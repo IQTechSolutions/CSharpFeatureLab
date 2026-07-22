@@ -1,0 +1,100 @@
+{
+  "series": "C# Feature Lab",
+  "tagline": "Real .NET features in under ten minutes",
+  "audience": "Beginner C# programmers ready to build complete applications",
+  "episodeDurationMinutes": {
+    "minimum": 6,
+    "maximum": 10
+  },
+  "youtube": {
+    "category": "Education",
+    "educationType": "How-to",
+    "releaseTime": "18:30 Africa/Johannesburg",
+    "pilotVisibility": "private"
+  },
+  "playlists": [
+    "C# Foundations",
+    "EF Core",
+    "Authentication & Authorization",
+    "Blazor",
+    "Real-time Chat",
+    "Production .NET",
+    "Multi-tenancy"
+  ],
+  "episodes": [
+    {
+      "number": 1,
+      "slug": "complete-vertical-slice",
+      "title": "Build Your First Complete C# Feature - Not Just an Endpoint",
+      "playlist": "C# Foundations",
+      "checkpoint": "episode/01-complete-vertical-slice",
+      "status": "pilot"
+    },
+    {
+      "number": 2,
+      "slug": "ef-core-models-and-migrations",
+      "title": "EF Core Models and Migrations: The First Gotchas",
+      "playlist": "EF Core",
+      "checkpoint": "episode/02-ef-core-models-and-migrations",
+      "status": "pilot"
+    },
+    {
+      "number": 3,
+      "slug": "authentication-beyond-login",
+      "title": "Authentication Is More Than a Login Form",
+      "playlist": "Authentication & Authorization",
+      "checkpoint": "episode/03-authentication-beyond-login",
+      "status": "pilot"
+    },
+    {
+      "number": 4,
+      "slug": "authorization-policies",
+      "title": "Protect a Feature with Authorization Policies",
+      "playlist": "Authentication & Authorization",
+      "status": "planned"
+    },
+    {
+      "number": 5,
+      "slug": "blazor-create-form",
+      "title": "Build a Blazor Form That Reports Useful Errors",
+      "playlist": "Blazor",
+      "status": "planned"
+    },
+    {
+      "number": 6,
+      "slug": "ef-core-concurrency",
+      "title": "Stop Lost Updates with EF Core Concurrency",
+      "playlist": "EF Core",
+      "status": "planned"
+    },
+    {
+      "number": 7,
+      "slug": "signalr-chat-first-slice",
+      "title": "Build the First Working SignalR Chat Slice",
+      "playlist": "Real-time Chat",
+      "status": "planned"
+    },
+    {
+      "number": 8,
+      "slug": "chat-persistence",
+      "title": "Persist Chat Messages Without Trusting the Client",
+      "playlist": "Real-time Chat",
+      "status": "planned"
+    },
+    {
+      "number": 9,
+      "slug": "background-jobs",
+      "title": "Move Slow Work into a Reliable Background Job",
+      "playlist": "Production .NET",
+      "status": "planned"
+    },
+    {
+      "number": 10,
+      "slug": "multitenant-boundary",
+      "title": "Your First Multi-tenant Boundary",
+      "playlist": "Multi-tenancy",
+      "status": "planned"
+    }
+  ]
+}
+
