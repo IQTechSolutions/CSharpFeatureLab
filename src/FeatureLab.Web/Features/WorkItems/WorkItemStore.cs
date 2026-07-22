@@ -1,33 +1,29 @@
-using System.Collections.Concurrent;
+using FeatureLab.Data;
+using Microsoft.EntityFrameworkCore;
 
 namespace FeatureLab.Features.WorkItems;
 
 public interface IWorkItemStore
 {
-    WorkItem Add(WorkItem workItem);
+    Task<WorkItem> AddAsync(WorkItem workItem, CancellationToken cancellationToken);
 
-    IReadOnlyList<WorkItem> List();
+    Task<IReadOnlyList<WorkItem>> ListAsync(CancellationToken cancellationToken);
 }
 
-public sealed class InMemoryWorkItemStore : IWorkItemStore
+public sealed class EfWorkItemStore(FeatureLabDbContext dbContext) : IWorkItemStore
 {
-    private readonly ConcurrentDictionary<Guid, WorkItem> _items = new();
-
-    public WorkItem Add(WorkItem workItem)
+    public async Task<WorkItem> AddAsync(WorkItem workItem, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(workItem);
 
-        if (!_items.TryAdd(workItem.Id, workItem))
-        {
-            throw new InvalidOperationException($"Work item '{workItem.Id}' already exists.");
-        }
-
+        dbContext.WorkItems.Add(workItem);
+        await dbContext.SaveChangesAsync(cancellationToken);
         return workItem;
     }
 
-    public IReadOnlyList<WorkItem> List() =>
-        _items.Values
+    public async Task<IReadOnlyList<WorkItem>> ListAsync(CancellationToken cancellationToken) =>
+        await dbContext.WorkItems
+            .AsNoTracking()
             .OrderByDescending(item => item.CreatedAtUtc)
-            .ToArray();
+            .ToArrayAsync(cancellationToken);
 }
-

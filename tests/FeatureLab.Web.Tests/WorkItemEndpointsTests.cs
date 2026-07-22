@@ -2,14 +2,15 @@ using System.Net;
 using System.Net.Http.Json;
 using FeatureLab.Features.WorkItems;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.Hosting;
 
 namespace FeatureLab.Web.Tests;
 
-public sealed class WorkItemEndpointsTests : IClassFixture<WebApplicationFactory<Program>>
+public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
 {
     private readonly HttpClient _client;
 
-    public WorkItemEndpointsTests(WebApplicationFactory<Program> factory)
+    public WorkItemEndpointsTests(FeatureLabWebFactory factory)
     {
         _client = factory.CreateClient();
     }
@@ -56,3 +57,23 @@ public sealed class WorkItemEndpointsTests : IClassFixture<WebApplicationFactory
     }
 }
 
+public sealed class FeatureLabWebFactory : WebApplicationFactory<Program>
+{
+    private readonly string _databasePath = Path.Combine(Path.GetTempPath(), $"feature-lab-{Guid.NewGuid():N}.db");
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        builder.UseEnvironment("Testing");
+        builder.UseSetting("ConnectionStrings:FeatureLab", $"Data Source={_databasePath};Pooling=False");
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+
+        if (disposing && File.Exists(_databasePath))
+        {
+            File.Delete(_databasePath);
+        }
+    }
+}

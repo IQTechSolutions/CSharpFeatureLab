@@ -10,6 +10,8 @@ has a source checkpoint, runnable tests, a transcript, captions and production m
 
 ```powershell
 dotnet restore CSharpFeatureLab.slnx
+dotnet tool restore
+dotnet ef database update --project src/FeatureLab.Web
 dotnet test CSharpFeatureLab.slnx
 dotnet run --project src/FeatureLab.Web
 ```
@@ -24,5 +26,6 @@ The API starts with two endpoints:
 - Every episode leaves the application compiling and tested.
 - User and tenant scope come from trusted server context, never request bodies.
 - Database migrations are reviewed source artifacts, not production startup side effects.
+- The teaching project uses SQLite to remove setup friction; provider-specific SQL Server
+  behaviour is called out and covered in the Production .NET arc.
 - Examples stay independent of private product or client code.
-

@@ -6,15 +6,18 @@ public static class WorkItemEndpoints
     {
         var group = endpoints.MapGroup("/api/work-items");
 
-        group.MapGet("/", (IWorkItemStore store) =>
-            Results.Ok(store.List().Select(WorkItemResponse.From)));
+        group.MapGet("/", async (IWorkItemStore store, CancellationToken cancellationToken) =>
+        {
+            var workItems = await store.ListAsync(cancellationToken);
+            return Results.Ok(workItems.Select(WorkItemResponse.From));
+        });
 
-        group.MapPost("/", (CreateWorkItemRequest request, IWorkItemStore store) =>
+        group.MapPost("/", async (CreateWorkItemRequest request, IWorkItemStore store, CancellationToken cancellationToken) =>
         {
             try
             {
                 var workItem = WorkItem.Create(request.Title, TimeProvider.System);
-                store.Add(workItem);
+                await store.AddAsync(workItem, cancellationToken);
 
                 return Results.Created($"/api/work-items/{workItem.Id}", WorkItemResponse.From(workItem));
             }
@@ -33,9 +36,8 @@ public static class WorkItemEndpoints
 
 public sealed record CreateWorkItemRequest(string Title);
 
-public sealed record WorkItemResponse(Guid Id, string Title, bool IsCompleted, DateTimeOffset CreatedAtUtc)
+public sealed record WorkItemResponse(Guid Id, string Title, bool IsCompleted, DateTime CreatedAtUtc)
 {
     public static WorkItemResponse From(WorkItem workItem) =>
         new(workItem.Id, workItem.Title, workItem.IsCompleted, workItem.CreatedAtUtc);
 }
-
