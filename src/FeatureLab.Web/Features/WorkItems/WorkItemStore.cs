@@ -7,7 +7,7 @@ public interface IWorkItemStore
 {
     Task<WorkItem> AddAsync(WorkItem workItem, CancellationToken cancellationToken);
 
-    Task<IReadOnlyList<WorkItem>> ListAsync(CancellationToken cancellationToken);
+    Task<IReadOnlyList<WorkItem>> ListAsync(string ownerId, CancellationToken cancellationToken);
 }
 
 public sealed class EfWorkItemStore(FeatureLabDbContext dbContext) : IWorkItemStore
@@ -21,9 +21,10 @@ public sealed class EfWorkItemStore(FeatureLabDbContext dbContext) : IWorkItemSt
         return workItem;
     }
 
-    public async Task<IReadOnlyList<WorkItem>> ListAsync(CancellationToken cancellationToken) =>
+    public async Task<IReadOnlyList<WorkItem>> ListAsync(string ownerId, CancellationToken cancellationToken) =>
         await dbContext.WorkItems
             .AsNoTracking()
+            .Where(item => item.OwnerId == ownerId)
             .OrderByDescending(item => item.CreatedAtUtc)
             .ToArrayAsync(cancellationToken);
 }

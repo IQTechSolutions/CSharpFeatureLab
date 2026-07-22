@@ -6,10 +6,11 @@ public sealed class WorkItem
     {
     }
 
-    private WorkItem(Guid id, string title, DateTime createdAtUtc)
+    private WorkItem(Guid id, string title, string ownerId, DateTime createdAtUtc)
     {
         Id = id;
         Title = title;
+        OwnerId = ownerId;
         CreatedAtUtc = createdAtUtc;
     }
 
@@ -19,9 +20,11 @@ public sealed class WorkItem
 
     public bool IsCompleted { get; private set; }
 
+    public string OwnerId { get; private set; } = string.Empty;
+
     public DateTime CreatedAtUtc { get; private set; }
 
-    public static WorkItem Create(string title, TimeProvider timeProvider)
+    public static WorkItem Create(string title, string ownerId, TimeProvider timeProvider)
     {
         ArgumentNullException.ThrowIfNull(timeProvider);
 
@@ -31,6 +34,11 @@ public sealed class WorkItem
             throw new ArgumentException("Title must contain between 3 and 120 characters.", nameof(title));
         }
 
-        return new WorkItem(Guid.NewGuid(), normalizedTitle, timeProvider.GetUtcNow().UtcDateTime);
+        if (string.IsNullOrWhiteSpace(ownerId))
+        {
+            throw new ArgumentException("An authenticated owner is required.", nameof(ownerId));
+        }
+
+        return new WorkItem(Guid.NewGuid(), normalizedTitle, ownerId, timeProvider.GetUtcNow().UtcDateTime);
     }
 }

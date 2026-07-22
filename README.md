@@ -18,6 +18,8 @@ dotnet run --project src/FeatureLab.Web
 
 The API starts with two endpoints:
 
+- `POST /account/register`
+- `POST /account/login`
 - `POST /api/work-items`
 - `GET /api/work-items`
 
@@ -25,6 +27,7 @@ The API starts with two endpoints:
 
 - Every episode leaves the application compiling and tested.
 - User and tenant scope come from trusted server context, never request bodies.
+- Work item ownership is derived from the authenticated name-identifier claim.
 - Database migrations are reviewed source artifacts, not production startup side effects.
 - The teaching project uses SQLite to remove setup friction; provider-specific SQL Server
   behaviour is called out and covered in the Production .NET arc.

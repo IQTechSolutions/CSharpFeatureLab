@@ -1,22 +1,26 @@
+using System.Security.Claims;
+
 namespace FeatureLab.Features.WorkItems;
 
 public static class WorkItemEndpoints
 {
     public static IEndpointRouteBuilder MapWorkItemEndpoints(this IEndpointRouteBuilder endpoints)
     {
-        var group = endpoints.MapGroup("/api/work-items");
+        var group = endpoints.MapGroup("/api/work-items")
+            .RequireAuthorization();
 
-        group.MapGet("/", async (IWorkItemStore store, CancellationToken cancellationToken) =>
+        group.MapGet("/", async (ClaimsPrincipal user, IWorkItemStore store, CancellationToken cancellationToken) =>
         {
-            var workItems = await store.ListAsync(cancellationToken);
+            var ownerId = RequiredOwnerId(user);
+            var workItems = await store.ListAsync(ownerId, cancellationToken);
             return Results.Ok(workItems.Select(WorkItemResponse.From));
         });
 
-        group.MapPost("/", async (CreateWorkItemRequest request, IWorkItemStore store, CancellationToken cancellationToken) =>
+        group.MapPost("/", async (CreateWorkItemRequest request, ClaimsPrincipal user, IWorkItemStore store, CancellationToken cancellationToken) =>
         {
             try
             {
-                var workItem = WorkItem.Create(request.Title, TimeProvider.System);
+                var workItem = WorkItem.Create(request.Title, RequiredOwnerId(user), TimeProvider.System);
                 await store.AddAsync(workItem, cancellationToken);
 
                 return Results.Created($"/api/work-items/{workItem.Id}", WorkItemResponse.From(workItem));
@@ -32,6 +36,10 @@ public static class WorkItemEndpoints
 
         return endpoints;
     }
+
+    private static string RequiredOwnerId(ClaimsPrincipal user) =>
+        user.FindFirstValue(ClaimTypes.NameIdentifier)
+        ?? throw new InvalidOperationException("The authenticated user has no name identifier claim.");
 }
 
 public sealed record CreateWorkItemRequest(string Title);
