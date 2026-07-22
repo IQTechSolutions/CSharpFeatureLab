@@ -1,0 +1,405 @@
+{
+  "episodes": [
+    {
+      "number": 1,
+      "slug": "complete-vertical-slice",
+      "title": "Build Your First Complete C# Feature - Not Just an Endpoint",
+      "playlist": "C# Foundations",
+      "checkpoint": "episode/01-complete-vertical-slice",
+      "accent": "#22D3EE",
+      "thumbnail": "BUILD A COMPLETE FEATURE",
+      "thumbnailCode": [
+        "request",
+        "  -> rules",
+        "  -> store",
+        "  -> API",
+        "  -> test"
+      ],
+      "description": "Build a complete work-item feature in .NET 10: request contract, domain rule, storage boundary, HTTP endpoint and integration test. This beginner lesson shows the smallest useful vertical slice and the shortcuts that become expensive later.",
+      "footer": "C# Feature Lab teaches real .NET features in under ten minutes.\n\n#csharp #dotnet #aspnetcore #programming",
+      "tags": [
+        "C#",
+        ".NET 10",
+        "ASP.NET Core",
+        "beginner programming",
+        "vertical slice"
+      ],
+      "chapters": [
+        { "scene": 1, "title": "The working result" },
+        { "scene": 3, "title": "Define the request contract" },
+        { "scene": 4, "title": "Put rules in the model" },
+        { "scene": 6, "title": "Map the HTTP endpoint" },
+        { "scene": 8, "title": "Prove the whole slice" },
+        { "scene": 10, "title": "Recap and next step" }
+      ],
+      "scenes": [
+        {
+          "eyebrow": "Outcome first",
+          "title": "One request. One saved work item.",
+          "bullets": [
+            "POST returns 201 Created",
+            "The title is trimmed and validated",
+            "A real HTTP test proves the result"
+          ],
+          "narration": "We are going to build one complete C sharp feature, not just type an endpoint and hope the rest appears later. The result is small: send a title to an ASP dot net Core API, validate it, create a work item, store it, and prove the response through a real HTTP test. When the request is valid, the API returns twenty one Created with a server generated identifier. When the title is empty or too long, it returns a useful validation response. That is already a vertical slice because one observable user outcome crosses every layer it needs."
+        },
+        {
+          "eyebrow": "The mental model",
+          "title": "A feature is a path, not a file",
+          "bullets": [
+            "Input contract",
+            "Business rule",
+            "Storage boundary",
+            "Transport result",
+            "Executable proof"
+          ],
+          "narration": "Beginners are often shown controllers, services, repositories, and entities as separate topics. That makes a codebase feel like a collection of folders. A feature is easier to understand as a path. Data enters through a contract. Business rules decide whether the request is valid. A storage boundary preserves the accepted state. The transport maps success or failure into an HTTP response. A test drives the same path a client will use. We will keep each part deliberately small, but we will not leave any part imaginary. The feature is only complete when the path works from the outside."
+        },
+        {
+          "eyebrow": "Contract",
+          "title": "Accept only what the client owns",
+          "bullets": [
+            "The client supplies a title",
+            "The server supplies identity and time"
+          ],
+          "code": "public sealed record CreateWorkItemRequest(\n    string Title);\n\npublic sealed record WorkItemResponse(\n    Guid Id,\n    string Title,\n    bool IsCompleted,\n    DateTime CreatedAtUtc);",
+          "narration": "Start with the request contract. The caller may choose the title, so the request contains one string. It does not contain an identifier, creation time, completed flag, or future owner identifier. Those values belong to trusted server behaviour. The response is a different contract because the server can now return the identifier, normalized title, status, and creation time. Separate request and response types make trust visible. If we reused the entity as an input model, a caller could eventually send fields that should never be under client control. The smallest contract is usually the safest contract and the easiest one to explain."
+        },
+        {
+          "eyebrow": "Business rule",
+          "title": "Keep valid state inside the model",
+          "bullets": [
+            "Trim before checking length",
+            "Reject titles outside 3 to 120 characters"
+          ],
+          "code": "public static WorkItem Create(\n    string title, TimeProvider clock)\n{\n    var clean = title?.Trim() ?? string.Empty;\n    if (clean.Length is < 3 or > 120)\n        throw new ArgumentException(\n            \"Title must contain 3 to 120 characters.\");\n\n    return new(Guid.NewGuid(), clean, clock.GetUtcNow());\n}",
+          "narration": "The model should make invalid state difficult to create. A static Create method trims the title, checks the useful length, and only then constructs the object. Notice that the constructor is not the public entry point. That gives the rule one home instead of repeating it in every endpoint or user interface. We also inject a TimeProvider rather than calling DateTime now inside the rule. The first endpoint uses the system clock, while a focused unit test can provide a fixed clock later. The identifier and time are generated after validation, so rejected requests do not pretend that a real work item existed."
+        },
+        {
+          "eyebrow": "Boundary",
+          "title": "Hide storage behind a tiny capability",
+          "bullets": [
+            "Add one accepted item",
+            "List current items",
+            "Thread-safe in-memory implementation for Episode 1"
+          ],
+          "code": "public interface IWorkItemStore\n{\n    WorkItem Add(WorkItem item);\n    IReadOnlyList<WorkItem> List();\n}\n\nservices.AddSingleton<IWorkItemStore,\n    InMemoryWorkItemStore>();",
+          "narration": "Episode one uses an in-memory store so we can see the feature shape without database setup hiding the lesson. The interface exposes only the capabilities this slice needs: add an accepted item and list current items. The implementation uses a concurrent dictionary because a singleton web service can handle several requests at once. This is not our final persistence strategy, and we should say that plainly. The boundary is useful because Episode two can replace the implementation with Entity Framework Core while the HTTP contract and business rule remain recognisable. An abstraction earns its keep when a real change crosses it, not because every class deserves an interface."
+        },
+        {
+          "eyebrow": "HTTP transport",
+          "title": "Map outcomes deliberately",
+          "bullets": [
+            "201 for accepted state",
+            "400 validation problem for rejected input"
+          ],
+          "code": "group.MapPost(\"/\", (CreateWorkItemRequest request,\n    IWorkItemStore store) =>\n{\n    try\n    {\n        var item = WorkItem.Create(\n            request.Title, TimeProvider.System);\n        store.Add(item);\n        return Results.Created($\"/api/work-items/{item.Id}\",\n            WorkItemResponse.From(item));\n    }\n    catch (ArgumentException error)\n    {\n        return Results.ValidationProblem(...);\n    }\n});",
+          "narration": "Now the endpoint coordinates the slice. It accepts the request contract and the store through dependency injection. It asks the model to create valid state, persists the result, and maps that result to twenty one Created. A rejected title becomes a validation problem rather than an unhandled five hundred error. The endpoint is orchestration, not the owner of the title rule. That distinction matters as the application grows. A Blazor form, a mobile client, and an import job can all reach the same rule through their own transport. Keep the endpoint readable enough that a reviewer can see the complete success and failure path without scrolling through unrelated helpers."
+        },
+        {
+          "eyebrow": "Common shortcut",
+          "title": "Do not trust generated fields from the request",
+          "bullets": [
+            "Client timestamps can be forged",
+            "Client identifiers can collide",
+            "Ownership will come from authentication"
+          ],
+          "narration": "A tempting shortcut is to bind the request directly to the entity. It looks convenient because the framework fills every property for us. It also quietly changes the trust boundary. A caller can forge creation times, choose identifiers that collide, mark new work as completed, or later claim another owner's data. Over-posting is not only a large enterprise security concern; it starts with beginner examples that teach the wrong shape. Use small request contracts and create trusted values on the server. In Episode three we will add authentication, and the owner identifier will come from the authenticated name identifier claim, never from JSON."
+        },
+        {
+          "eyebrow": "Executable proof",
+          "title": "Test through the same HTTP boundary",
+          "bullets": [
+            "The real application starts in memory",
+            "Serialization, routing and status codes are included"
+          ],
+          "code": "var response = await client.PostAsJsonAsync(\n    \"/api/work-items\",\n    new { title = \"  Ship the first feature  \" });\n\nAssert.Equal(HttpStatusCode.Created,\n    response.StatusCode);\nvar created = await response.Content\n    .ReadFromJsonAsync<WorkItemResponse>();\nAssert.Equal(\"Ship the first feature\", created!.Title);",
+          "narration": "The proof starts the actual web application with WebApplicationFactory and sends JSON over an HttpClient. This is more valuable than calling the endpoint delegate directly because routing, model binding, serialization, dependency injection, and status mapping all participate. The test deliberately sends whitespace around the title and asserts the normalized response. A second test sends an empty title and expects Bad Request. A third creates an item and confirms the list endpoint can see it. Three small tests describe the public behaviour of the slice. If we later change storage, these tests should continue to describe the same feature contract."
+        },
+        {
+          "eyebrow": "Run it",
+          "title": "Build green before adding a database",
+          "bullets": [
+            "dotnet restore",
+            "dotnet test",
+            "3 tests passed",
+            "Checkpoint: episode/01-complete-vertical-slice"
+          ],
+          "narration": "Run dotnet test from the companion solution. The web project builds, the test host starts, and all three integration tests pass. This checkpoint is intentionally modest. Restarting the process loses the work items, and that is exactly the next problem we will solve. The important part is that we now have a stable outside contract before persistence arrives. When Entity Framework changes the implementation, a regression in validation or HTTP behaviour will be visible immediately. Small green checkpoints make a course easier to follow and a production codebase easier to change."
+        },
+        {
+          "eyebrow": "Recap",
+          "title": "Complete means observable and proven",
+          "bullets": [
+            "Contract",
+            "Rule",
+            "Boundary",
+            "Response",
+            "Test"
+          ],
+          "narration": "A complete beginner feature does not need many projects or a complicated architecture. It needs a clear input contract, one home for the rule, a storage capability, deliberate transport results, and executable proof. That is enough structure to grow without pretending we already know every future requirement. In Episode two we will replace the in-memory store with Entity Framework Core, create a reviewed migration, and meet two provider gotchas that a fake database test would completely miss. The code for this exact checkpoint is tagged in the companion repository so you can run it before moving on."
+        }
+      ],
+      "short": {
+        "title": "An Endpoint Is Not a Feature #Shorts",
+        "scenes": [
+          {
+            "eyebrow": "Beginner trap",
+            "title": "AN ENDPOINT IS NOT A FEATURE",
+            "bullets": ["A route alone proves almost nothing"],
+            "narration": "A route that returns two hundred is not a complete C sharp feature. It only proves that one delegate ran. The caller still needs rules, storage, useful failures, and proof."
+          },
+          {
+            "eyebrow": "The real slice",
+            "title": "FOLLOW THE WHOLE PATH",
+            "bullets": ["Contract to rule", "Rule to storage", "Storage to response"],
+            "narration": "A useful vertical slice follows the whole path: request contract, business rule, storage boundary, deliberate HTTP result, and executable proof. Skip one, and the user outcome remains partly imaginary."
+          },
+          {
+            "eyebrow": "Trust boundary",
+            "title": "THE SERVER CREATES TRUSTED VALUES",
+            "bullets": ["Identifier", "Creation time", "Future owner scope"],
+            "narration": "Let the caller provide only the title. Generate identifiers, creation time, and ownership on the server so clients cannot forge trusted state. Small request contracts make that boundary visible."
+          },
+          {
+            "eyebrow": "Practical rule",
+            "title": "COMPLETE MEANS OBSERVABLE AND PROVEN",
+            "bullets": ["Run the HTTP test", "Then add the database"],
+            "narration": "Test through the real HTTP boundary. When the response, validation, storage, and serialization all work together, you have a feature worth extending. Then add the next layer from a green checkpoint."
+          }
+        ]
+      },
+      "linkedin": "A working endpoint is not yet a complete feature.\n\nFor the first C# Feature Lab lesson, I reduced a work-item slice to five things: a narrow request contract, one home for the rule, a storage capability, deliberate HTTP results, and an integration test through the real application boundary.\n\nThe useful beginner lesson is not folder structure. It is trust. The client supplies the title; the server supplies the identifier, timestamp and eventually the owner. That one distinction prevents a surprising number of later security and data-integrity problems.\n\nThe first checkpoint deliberately uses in-memory storage. Episode two replaces it with EF Core while the external contract stays fixed.\n\nWhat was the first feature that made application architecture click for you?",
+      "devArticle": "# An Endpoint Is Not a Complete Feature\n\nWhen beginners first meet ASP.NET Core, examples often stop as soon as a route returns `200 OK`. That proves routing works, but it does not yet prove a useful application outcome.\n\nA small vertical slice needs five connected pieces: an input contract, a business rule, a storage capability, an intentional transport result, and an executable test. The pieces can remain tiny. The value comes from following one user outcome all the way through the system.\n\n## Start with trust\n\nFor a new work item, the caller owns the title. The caller does not own the identifier, creation time, completion state or future owner scope. A dedicated request record makes that boundary explicit. Binding the request directly to an entity may look convenient, but it teaches over-posting and allows untrusted fields to leak into the model.\n\n## Give the rule one home\n\nThe `WorkItem.Create` method trims the title and enforces a length between three and 120 characters. Invalid state never escapes the factory. Using `TimeProvider` also keeps the clock controllable when focused tests arrive.\n\n## Keep the first storage boundary honest\n\nThe first checkpoint uses a thread-safe in-memory implementation. It is not called production persistence. Its purpose is to reveal the feature shape and give EF Core a real boundary to replace in the next episode. Abstractions are useful when an actual change crosses them.\n\n## Test from the outside\n\n`WebApplicationFactory` starts the real application and sends JSON over `HttpClient`. Routing, serialization, dependency injection, validation and status codes are now part of the proof. Three tests cover successful creation, invalid input and listing accepted state.\n\nThe result is not a large architecture. It is one observable, tested path that can safely grow."
+    },
+    {
+      "number": 2,
+      "slug": "ef-core-models-and-migrations",
+      "title": "EF Core Models and Migrations: The First Gotchas",
+      "playlist": "EF Core",
+      "checkpoint": "episode/02-ef-core-models-and-migrations",
+      "accent": "#2DD4BF",
+      "thumbnail": "EF CORE: FIRST GOTCHAS",
+      "thumbnailCode": [
+        "DbContext",
+        "Migration",
+        "AsNoTracking",
+        "Real provider",
+        "Green tests"
+      ],
+      "description": "Replace in-memory storage with EF Core and SQLite while keeping the feature contract stable. Learn reviewed migrations, no-tracking queries, dependency auditing and a provider translation failure that only a real database test caught.",
+      "footer": "C# Feature Lab teaches real .NET features in under ten minutes.\n\n#csharp #dotnet #efcore #database",
+      "tags": ["C#", ".NET 10", "EF Core", "SQLite", "database migrations"],
+      "chapters": [
+        { "scene": 1, "title": "Why persistence changes the feature" },
+        { "scene": 3, "title": "Map the model explicitly" },
+        { "scene": 4, "title": "Create a reviewed migration" },
+        { "scene": 6, "title": "Do not migrate on startup" },
+        { "scene": 7, "title": "Dependency advisory gotcha" },
+        { "scene": 8, "title": "Provider translation gotcha" },
+        { "scene": 10, "title": "Recap" }
+      ],
+      "scenes": [
+        {
+          "eyebrow": "The next failure",
+          "title": "Restart the app. The work is gone.",
+          "bullets": ["The HTTP contract works", "The in-memory implementation is temporary", "Persistence is the next vertical change"],
+          "narration": "Episode one proved the complete HTTP path, but restart the application and every work item disappears. Today we will replace only the storage implementation with Entity Framework Core and SQLite. The create and list contracts stay the same. That stability is the point of the first checkpoint. We will add a DbContext, explicit mapping, a reviewed migration, asynchronous database calls, and provider-backed integration tests. Along the way the build will stop on a vulnerable native dependency, and a list query will fail only at runtime because SQLite cannot translate the chosen date type. Those are not distractions. They are the lesson."
+        },
+        {
+          "eyebrow": "Mental model",
+          "title": "EF Core is a unit of work plus a model",
+          "bullets": ["DbContext tracks a unit of work", "Mapping describes the relational model", "A provider translates LINQ into database behaviour"],
+          "narration": "Entity Framework Core is not simply a magic replacement for SQL. A DbContext represents a unit of work and tracks changes to entities. The model describes tables, keys, required values, lengths and indexes. A provider translates LINQ and model operations into behaviour for a particular database. SQLite, SQL Server and PostgreSQL share EF Core concepts, but they do not have identical types or SQL capabilities. That is why a test using a fake provider cannot prove a query will run against the real one. We will keep SQLite for low setup friction and call out the places where a SQL Server application needs separate verification."
+        },
+        {
+          "eyebrow": "Registration",
+          "title": "Register one scoped DbContext",
+          "bullets": ["Connection string comes from configuration", "The store becomes scoped", "No database work in constructors"],
+          "code": "var connection = configuration\n    .GetConnectionString(\"FeatureLab\")\n    ?? \"Data Source=app.db\";\n\nservices.AddDbContext<FeatureLabDbContext>(options =>\n    options.UseSqlite(connection));\nservices.AddScoped<IWorkItemStore, EfWorkItemStore>();",
+          "narration": "The web host reads a named connection string and registers one scoped FeatureLabDbContext. Scoped lifetime aligns one context with one web request. The work item store also becomes scoped because it depends on that context. We do not open connections or create tables in constructors. Configuration selects the provider and location; application code consumes the configured context. For a production SQL Server deployment, this registration changes to UseSqlServer and the migrations must be created and tested for that provider. A migration is provider-specific source code, not a universal database script."
+        },
+        {
+          "eyebrow": "Relational model",
+          "title": "Make important constraints visible",
+          "bullets": ["Primary key", "Required title with maximum length", "Index for the ordering query"],
+          "code": "var item = modelBuilder.Entity<WorkItem>();\nitem.ToTable(\"WorkItems\");\nitem.HasKey(x => x.Id);\nitem.Property(x => x.Title)\n    .HasMaxLength(120)\n    .IsRequired();\nitem.Property(x => x.CreatedAtUtc)\n    .IsRequired();\nitem.HasIndex(x => x.CreatedAtUtc);",
+          "narration": "Explicit mapping makes the intended database contract readable. The work item has a primary key. Its title is required and limited to the same maximum length as the domain rule. The creation time is required, and an index supports our newest-first list query. Application validation gives callers useful feedback. Database constraints defend integrity when another code path or a bug reaches persistence. Those are complementary layers, not duplication to remove. Avoid creating an index for every property. Start from actual query shapes, then measure. Here the list endpoint already orders by creation time, so the index has a concrete reason to exist."
+        },
+        {
+          "eyebrow": "Schema history",
+          "title": "Generate and review the migration",
+          "bullets": ["Restore the local EF tool", "Add InitialWorkItems", "Read Up and Down before applying"],
+          "code": "dotnet tool restore\n\ndotnet ef migrations add InitialWorkItems \\\n  --project src/FeatureLab.Web \\\n  --output-dir Data/Migrations\n\ndotnet ef database update \\\n  --project src/FeatureLab.Web",
+          "narration": "The repository pins a local dotnet EF tool so every learner uses the same version as the runtime packages. Generate the InitialWorkItems migration into source control, then read it. Up should create the WorkItems table and intended indexes. Down should reverse that change. Do not treat generated code as unquestionable. A rename can appear as a destructive drop and add. A required column added to existing rows needs a safe backfill strategy. Migrations are deployment artifacts that deserve review. After review, apply the migration explicitly with database update in development or through the deployment pipeline in production."
+        },
+        {
+          "eyebrow": "Persistence implementation",
+          "title": "Use async writes and no-tracking reads",
+          "bullets": ["SaveChangesAsync for the command", "AsNoTracking for read-only results", "Cancellation flows from the request"],
+          "code": "public async Task<WorkItem> AddAsync(\n    WorkItem item, CancellationToken ct)\n{\n    db.WorkItems.Add(item);\n    await db.SaveChangesAsync(ct);\n    return item;\n}\n\nreturn await db.WorkItems\n    .AsNoTracking()\n    .OrderByDescending(x => x.CreatedAtUtc)\n    .ToArrayAsync(ct);",
+          "narration": "The EF store keeps the same capability as Episode one but becomes asynchronous. Adding an entity marks it for insertion, and SaveChangesAsync commits the unit of work. The list query uses AsNoTracking because the endpoint returns read-only response models and will not update those instances. Tracking every row would consume memory without helping this query. The cancellation token flows from ASP dot net Core into the database operation, allowing abandoned requests to stop work when the provider supports it. Do not add async keywords to CPU-only methods, but database I O is exactly where asynchronous APIs protect server throughput."
+        },
+        {
+          "eyebrow": "Production gotcha",
+          "title": "Do not migrate every database on web startup",
+          "bullets": ["Concurrent instances can race", "Schema locks delay readiness", "Deployment needs an auditable failure boundary"],
+          "narration": "It is convenient to call Database Migrate every time the web application starts. That convenience becomes risky when several production instances start together, a migration needs a long schema lock, or the application identity should not have schema modification permission. The teaching app applies EnsureCreated only in its isolated Testing environment. Development uses an explicit database update command. A production system should run reviewed migrations through a deployment step or a single controlled migration job, observe the result, and only then release normal traffic. Startup should report whether the expected schema is present, not quietly compete to redesign it."
+        },
+        {
+          "eyebrow": "Supply chain gotcha",
+          "title": "Warnings-as-errors caught a vulnerable native bundle",
+          "bullets": ["Restore reported NU1903", "The build stopped", "Pin the patched SQLitePCLRaw bundle"],
+          "code": "<TreatWarningsAsErrors>true</TreatWarningsAsErrors>\n\n<PackageReference\n  Include=\"SQLitePCLRaw.bundle_e_sqlite3\"\n  Version=\"3.0.4\" />",
+          "narration": "The first restore did not pass. EF Core's SQLite dependency graph selected a native bundle version with a high severity security advisory. Because the project treats warnings as errors, the build stopped instead of hiding the problem in yellow text. The fix is to pin the current patched SQLitePCLRaw bundle, restore again, and verify a clean dependency graph. Do not disable vulnerability auditing simply to make a tutorial build green. Package dependencies are part of the application you ship. This real interruption became a better teaching example than a perfectly scripted restore would have been."
+        },
+        {
+          "eyebrow": "Provider gotcha",
+          "title": "The create tests passed. The list query returned 500.",
+          "bullets": ["SQLite cannot order this DateTimeOffset expression", "The in-memory store never exercised translation", "Use a provider-compatible UTC type"],
+          "code": "// First draft\npublic DateTimeOffset CreatedAtUtc { get; private set; }\n\n// SQLite-compatible model for this course\npublic DateTime CreatedAtUtc { get; private set; }\n\nreturn new WorkItem(\n    id, title, clock.GetUtcNow().UtcDateTime);",
+          "narration": "The next failure appeared only when the list endpoint executed. Creation succeeded, but ordering by DateTimeOffset produced a provider translation exception and the API returned five hundred. SQLite does not support that ordering in the same way SQL Server does. The in-memory implementation could never reveal this. For the low-friction SQLite course model, we store an explicitly UTC DateTime and keep the Utc suffix visible. A SQL Server production model may choose datetimeoffset and test it with SQL Server. The general rule is more important than the specific type: model time deliberately, document the convention, and run important queries against the provider you deploy."
+        },
+        {
+          "eyebrow": "Executable proof",
+          "title": "The tests now use the real SQLite provider",
+          "bullets": ["A temporary database per test fixture", "Pooling disabled for clean disposal", "3 integration tests pass"],
+          "narration": "The test factory supplies a unique temporary SQLite file and starts the application in a Testing environment. The schema is created only for that isolated database. Connection pooling is disabled so disposal can remove the file reliably on Windows. The same create, validation, and list tests from Episode one now pass through EF Core and the real SQLite translator. These tests are still fast, but they cover far more than EF's in-memory test double. For SQL Server-specific behaviour, the next level is a disposable SQL Server container in integration tests. Match the test cost to the risk you need to cover."
+        },
+        {
+          "eyebrow": "Recap",
+          "title": "Persistence is a behaviour change, not a package install",
+          "bullets": ["Explicit model", "Reviewed migration", "Async store", "Audited dependencies", "Provider-backed tests"],
+          "narration": "Replacing memory with EF Core changed lifetimes, failure modes, deployment artifacts, dependency risk, query translation, and test strategy. The external work-item contract stayed stable because Episode one established it first. That is the value of vertical checkpoints. In Episode three we will add ASP dot net Core Identity, require authentication for the work-item routes, derive ownership from the server authenticated principal, and prove that one user cannot read another user's data. Authentication will be treated as identity, session, authorization, and resource scope, not merely a login form."
+        }
+      ],
+      "short": {
+        "title": "Your EF Core Fake Missed the Real Failure #Shorts",
+        "scenes": [
+          { "eyebrow": "EF Core gotcha", "title": "CREATE PASSED. LIST RETURNED 500.", "bullets": ["The fake never translated the query"], "narration": "Our EF Core create tests passed, but the list endpoint returned five hundred. The in-memory version never translated the LINQ query, so its green result gave us confidence it had not earned." },
+          { "eyebrow": "Real provider", "title": "SQLITE REJECTED THE DATE ORDERING", "bullets": ["DateTimeOffset differs by provider"], "narration": "SQLite could not order the DateTimeOffset expression the way SQL Server can. Provider differences are application behaviour, not implementation trivia." },
+          { "eyebrow": "The fix", "title": "TEST IMPORTANT QUERIES FOR REAL", "bullets": ["Use a temporary SQLite database", "Use SQL Server for SQL Server-specific risk"], "narration": "Use a temporary real provider in integration tests. For this course we store explicit UTC DateTime values; a SQL Server application should verify datetimeoffset with SQL Server before release." },
+          { "eyebrow": "Practical rule", "title": "A GREEN FAKE IS NOT DATABASE PROOF", "bullets": ["Translate", "Execute", "Observe failures"], "narration": "A fast fake is useful for some rules, but it cannot prove provider translation. Run the queries that matter against the database behaviour you plan to ship." }
+        ]
+      },
+      "linkedin": "A green EF Core test can still hide a production query failure.\n\nWhile building the second C# Feature Lab checkpoint, create operations passed but the list endpoint returned 500. The query ordered a `DateTimeOffset`; SQLite could not translate that ordering in the same way SQL Server can.\n\nThe in-memory implementation never had to translate anything, so it could not reveal the problem. A temporary SQLite database did.\n\nThe same slice also caught a vulnerable native SQLite dependency because warnings-as-errors stopped restore. Both failures are useful reminders: providers and transitive packages are part of application behaviour.\n\nMy practical hierarchy is: focused tests for rules, a real lightweight provider for general persistence behaviour, and the production provider for provider-specific risk.\n\nWhich EF Core provider difference has surprised you most?",
+      "devArticle": "# Two EF Core Gotchas a Fake Database Did Not Catch\n\nReplacing an in-memory work-item store with EF Core looked straightforward: register a `DbContext`, map the entity, generate a migration and update the store. The external API contract did not change. The failure modes did.\n\n## Treat migrations as source\n\nThe model maps the primary key, a required 120-character title, creation time and the index used by the list query. The generated migration is checked into source and reviewed before it is applied. Production startup does not call `Migrate()` on every instance; schema changes belong to a controlled deployment boundary.\n\n## The first restore stopped\n\nWarnings-as-errors turned a NuGet vulnerability advisory for the native SQLite bundle into a failed build. The correct response was to pin the patched bundle, not disable auditing. Transitive native code is still code the application ships.\n\n## The query failed only with a provider\n\nCreate tests passed. Listing items returned 500 because SQLite could not translate ordering over the original `DateTimeOffset` property. The in-memory implementation never translated LINQ into SQL, so it had no chance of exposing the issue.\n\nFor this SQLite teaching application, the model uses an explicitly UTC `DateTime`. A SQL Server production application may deliberately use `datetimeoffset`, but it should prove that behaviour with SQL Server.\n\n## Use a test hierarchy\n\nFocused tests are ideal for domain rules. A temporary SQLite database provides fast relational and translation coverage. SQL Server-specific queries, migrations and concurrency deserve SQL Server integration tests.\n\nThe lesson is not that SQLite is bad or every test needs a container. It is that the confidence a test provides is bounded by the behaviour it actually executes."
+    },
+    {
+      "number": 3,
+      "slug": "authentication-beyond-login",
+      "title": "Authentication Is More Than a Login Form",
+      "playlist": "Authentication & Authorization",
+      "checkpoint": "episode/03-authentication-beyond-login",
+      "accent": "#8B5CF6",
+      "thumbnail": "AUTH IS MORE THAN LOGIN",
+      "thumbnailCode": ["identity", "session", "authorization", "owner scope", "isolation test"],
+      "description": "Add ASP.NET Core Identity to the work-item feature, require authenticated access and derive ownership from the server principal. Then prove anonymous rejection and cross-user isolation with real registration and login flows.",
+      "footer": "C# Feature Lab teaches real .NET features in under ten minutes.\n\n#csharp #dotnet #aspnetcore #authentication #security",
+      "tags": ["C#", ".NET 10", "ASP.NET Core Identity", "authentication", "authorization"],
+      "chapters": [
+        { "scene": 1, "title": "Authentication is a system" },
+        { "scene": 2, "title": "Identity, session, authorization and scope" },
+        { "scene": 4, "title": "Register Identity endpoints" },
+        { "scene": 5, "title": "Require authentication" },
+        { "scene": 6, "title": "Derive ownership on the server" },
+        { "scene": 9, "title": "Prove cross-user isolation" },
+        { "scene": 11, "title": "Production boundaries" },
+        { "scene": 12, "title": "Recap" }
+      ],
+      "scenes": [
+        {
+          "eyebrow": "Outcome first",
+          "title": "Anonymous is rejected. Users see only their own work.",
+          "bullets": ["Register and login through Identity", "Bearer session reaches protected routes", "Cross-user isolation is tested"],
+          "narration": "Today the work-item feature becomes personal. An anonymous caller receives Unauthorized. A registered user can log in, create a work item, and list only work that belongs to that authenticated identity. A second user cannot see the first user's item. We will use ASP dot net Core Identity's API endpoints so password hashing, credential verification, lockout hooks, and token issuance do not become home-made security code. The important lesson is that authentication is not a login form. It is an identity store, a session mechanism, authorization at the route, resource scope in every query, and tests that prove the boundaries."
+        },
+        {
+          "eyebrow": "Mental model",
+          "title": "Four questions, not one login screen",
+          "bullets": ["Who is this?", "How is the session carried?", "May this identity use the route?", "Which rows belong to this identity?"],
+          "narration": "Separate four questions. Identity answers who the account represents and how credentials are verified. The session answers how later requests prove that login without sending a password again; this could be a secure cookie or a bearer token. Authorization answers whether the authenticated principal may use a capability. Resource scope answers which specific records the principal may access. A route can require authentication and still leak data if its query forgets the owner filter. Keeping these questions separate makes security reviews clearer and prevents one successful login from being treated as permission to read the whole database."
+        },
+        {
+          "eyebrow": "Identity model",
+          "title": "Let Identity own credential state",
+          "bullets": ["FeatureLabUser extends IdentityUser", "The DbContext gains Identity tables", "Passwords never enter the work-item model"],
+          "code": "public sealed class FeatureLabUser : IdentityUser;\n\npublic sealed class FeatureLabDbContext(\n    DbContextOptions<FeatureLabDbContext> options)\n    : IdentityDbContext<FeatureLabUser>(options)\n{\n    public DbSet<WorkItem> WorkItems => Set<WorkItem>();\n}",
+          "narration": "The application user is deliberately small and extends IdentityUser. The DbContext now derives from IdentityDbContext and calls the base model configuration before mapping work items. Identity owns password hashes, normalised user names, security stamps, tokens, claims, roles, logins and lockout state. The feature model does not know how passwords work. That separation is both safer and easier to evolve. The new migration adds the Identity schema plus one OwnerId column and index for work items. Read that migration as carefully as the first one, especially when adding a required owner to an existing production table that already contains data."
+        },
+        {
+          "eyebrow": "Framework setup",
+          "title": "Use the built-in Identity API endpoints",
+          "bullets": ["Identity stores use the same DbContext", "Authorization services are registered", "Account endpoints live under /account"],
+          "code": "services.AddAuthorization();\nservices.AddIdentityApiEndpoints<FeatureLabUser>()\n    .AddEntityFrameworkStores<FeatureLabDbContext>();\n\napp.UseAuthentication();\napp.UseAuthorization();\napp.MapGroup(\"/account\")\n    .MapIdentityApi<FeatureLabUser>();",
+          "narration": "Register authorization and Identity API endpoints, then connect the Identity stores to our EF Core DbContext. Authentication middleware reads the session and constructs the ClaimsPrincipal. Authorization middleware evaluates endpoint requirements. Mapping Identity under slash account gives us registration, login, refresh and account-management contracts supplied by the framework. This is a teaching baseline, not a complete public account journey. A real product still needs confirmed email, recovery, multi-factor authentication, rate limiting, monitoring, privacy controls, and carefully configured cookie or token transport. Start from the framework's security primitives rather than inventing password storage."
+        },
+        {
+          "eyebrow": "Route authorization",
+          "title": "Protect the whole feature group once",
+          "bullets": ["Create and list share one requirement", "Anonymous requests stop before handlers run"],
+          "code": "var group = endpoints\n    .MapGroup(\"/api/work-items\")\n    .RequireAuthorization();\n\ngroup.MapGet(\"/\", ListAsync);\ngroup.MapPost(\"/\", CreateAsync);",
+          "narration": "Require authorization on the work-item route group rather than remembering it on every individual endpoint. Both create and list now reject anonymous requests before the handlers execute. Group-level protection also makes the contract obvious during review. Later, specific endpoints can add policies for capabilities such as completing or administering work. Do not confuse RequireAuthorization with resource isolation. It proves that some authenticated principal exists and meets the current policy. The next step must still derive the exact owner from that principal and include it in persistence."
+        },
+        {
+          "eyebrow": "Trusted ownership",
+          "title": "The owner comes from ClaimsPrincipal, never JSON",
+          "bullets": ["Read NameIdentifier", "Reject a malformed authenticated principal", "Create the entity with server-derived ownership"],
+          "code": "private static string RequiredOwnerId(\n    ClaimsPrincipal user) =>\n    user.FindFirstValue(ClaimTypes.NameIdentifier)\n    ?? throw new InvalidOperationException(\n        \"Authenticated user has no name identifier.\");\n\nvar item = WorkItem.Create(\n    request.Title, RequiredOwnerId(user), clock);",
+          "narration": "The endpoint receives the ClaimsPrincipal created by authentication and reads the standard name identifier claim. The request still contains only the title. The owner is passed into the model from trusted server context. If we allowed an OwnerId property in JSON, any authenticated user could attempt to create work for another account. Treat a missing name identifier as a server configuration failure, not as anonymous input. In larger systems, wrap this claim parsing behind a small current-user service so every feature uses the same required identifiers and assurance rules. The principle stays the same: scope is resolved on the server."
+        },
+        {
+          "eyebrow": "Data boundary",
+          "title": "Every read includes the owner predicate",
+          "bullets": ["Filter before materialization", "Index owner and creation time", "Do not fetch everything and filter in memory"],
+          "code": "return await db.WorkItems\n    .AsNoTracking()\n    .Where(item => item.OwnerId == ownerId)\n    .OrderByDescending(item => item.CreatedAtUtc)\n    .ToArrayAsync(cancellationToken);\n\nitem.HasIndex(x => new\n{\n    x.OwnerId, x.CreatedAtUtc\n});",
+          "narration": "The list query receives the required owner identifier and applies the predicate before materializing any rows. Do not load all work items and filter them in memory. That wastes data access and creates a dangerous window where another layer can accidentally observe records it should never hold. The relational model adds a composite index over owner and creation time because that matches the exact filtered ordering query. Route authorization and query scope are both required. A future detail, update, or delete endpoint must make the same ownership decision before returning the resource."
+        },
+        {
+          "eyebrow": "Real account flow",
+          "title": "The test registers and logs in like a client",
+          "bullets": ["Unique learner account", "Strong test password", "Bearer token added to later requests"],
+          "code": "await client.PostAsJsonAsync(\n    \"/account/register\", new { email, password });\n\nvar login = await client.PostAsJsonAsync(\n    \"/account/login\", new { email, password });\nvar tokens = await login.Content\n    .ReadFromJsonAsync<LoginTokenResponse>();\n\nclient.DefaultRequestHeaders.Authorization =\n    new(\"Bearer\", tokens!.AccessToken);",
+          "narration": "The integration test does not install a fake authenticated principal. It registers a unique account through the mapped Identity endpoint, logs in with the password, reads the returned access token, and attaches a Bearer header to later requests. That proves our Identity registration, credential verification, token handling, authentication middleware, and protected endpoints cooperate. For tests focused only on authorization rules, a controlled fake handler can be faster. For this pilot, the real flow is valuable because the lesson claims that registration and login work. Tests should execute the behaviour the lesson promises."
+        },
+        {
+          "eyebrow": "Negative proof",
+          "title": "Anonymous create returns 401",
+          "bullets": ["No token", "No handler execution", "No work item created"],
+          "code": "using var client = factory.CreateClient();\n\nvar response = await client.PostAsJsonAsync(\n    \"/api/work-items\",\n    new { title = \"Must not be accepted\" });\n\nAssert.Equal(HttpStatusCode.Unauthorized,\n    response.StatusCode);",
+          "narration": "A positive login test is not enough. The anonymous test creates a normal client with no session and sends a valid-looking work-item request. The expected result is Unauthorized. This proves the route group is protected independently of title validation. In a deeper test we could also confirm that no row was inserted. Negative tests are especially important around security boundaries because the failure behaviour is the feature. Be precise about status codes: unauthenticated usually maps to four oh one, while an authenticated principal that lacks a required permission usually maps to four oh three."
+        },
+        {
+          "eyebrow": "Isolation proof",
+          "title": "User B cannot list User A's work item",
+          "bullets": ["Two real accounts", "One private row", "Second list excludes it"],
+          "code": "using var alice = await AuthenticatedClientAsync();\nusing var bob = await AuthenticatedClientAsync();\n\nawait alice.PostAsJsonAsync(\"/api/work-items\",\n    new { title = \"Alice private item\" });\n\nvar items = await bob.GetFromJsonAsync<WorkItemResponse[]>(\n    \"/api/work-items\");\nAssert.DoesNotContain(items!,\n    item => item.Title == \"Alice private item\");",
+          "narration": "The most important pilot test creates two independent Identity accounts. Alice creates a private work item. Bob calls the same list route with his own valid token. His response must not contain Alice's title. This is the first resource isolation test, and it would catch a missing owner predicate even though both users are correctly authenticated. As the application grows, prefer assertions against stable identifiers rather than titles, and verify detail, update and delete commands too. For multi-tenancy later, the scope will combine user and tenant context, but the habit begins here: prove isolation with at least two principals."
+        },
+        {
+          "eyebrow": "Production boundaries",
+          "title": "Identity endpoints are a foundation, not the whole journey",
+          "bullets": ["Confirmed email and recovery", "MFA and step-up for sensitive actions", "Secure cookies or carefully stored tokens", "Rate limits, audit and revocation"],
+          "narration": "The built-in endpoints remove dangerous reinvention, but production authentication still needs product decisions. Confirm email before trusting an address. Provide recovery without revealing whether an account exists. Use multi-factor or fresh step-up authentication for sensitive changes. Browser applications often prefer secure, HTTP-only, same-site cookies so JavaScript cannot read the session token. Mobile clients need protected token storage and refresh handling. Add rate limits, lockout monitoring, security-event audit, revocation and data-protection key management. Never log passwords, raw reset tokens or bearer tokens. The framework supplies primitives; your threat model and operations complete the system."
+        },
+        {
+          "eyebrow": "Recap",
+          "title": "Authentication establishes identity. Scope protects data.",
+          "bullets": ["Identity store", "Session", "Route authorization", "Server-derived owner", "Cross-user isolation test"],
+          "narration": "We added Identity's account store and endpoints, carried the session with a bearer token, required authentication for the feature group, derived the owner from the server principal, filtered every list query by that owner, and proved both anonymous rejection and cross-user isolation. Five integration tests now pass on the final pilot checkpoint. In the next lesson, authorization policies will move beyond any logged-in user and express a real capability. Later Blazor and mobile lessons will choose session transport appropriate to each client. Remember the compact rule: authentication establishes identity; authorization and server-side scope protect the action and the data."
+        }
+      ],
+      "short": {
+        "title": "Login Does Not Protect Your Rows #Shorts",
+        "scenes": [
+          { "eyebrow": "Security trap", "title": "LOGIN DOES NOT PROTECT YOUR ROWS", "bullets": ["Both users may be valid", "The query can still leak data"], "narration": "A successful login proves who the caller is. It does not prove which database rows that caller may read. Two valid accounts can still experience a serious data leak." },
+          { "eyebrow": "Four boundaries", "title": "IDENTITY. SESSION. AUTHORIZATION. SCOPE.", "bullets": ["Each answers a different question"], "narration": "Treat identity, session, route authorization, and resource scope as four separate boundaries. Missing any one can break the feature even when the login screen appears perfect." },
+          { "eyebrow": "Trusted context", "title": "NEVER ACCEPT OWNER ID FROM JSON", "bullets": ["Read NameIdentifier", "Filter before materializing"], "narration": "Derive the owner identifier from the authenticated principal on the server, then include it in every create and query path. Never let the caller choose trusted ownership." },
+          { "eyebrow": "The proof", "title": "TEST WITH TWO REAL USERS", "bullets": ["Alice creates", "Bob must not see it"], "narration": "Create two real accounts in an integration test. If Bob can see Alice's item, authentication worked and your data authorization still failed. That negative assertion is the security feature." }
+        ]
+      },
+      "linkedin": "Authentication working does not mean user data is protected.\n\nIn the third C# Feature Lab checkpoint, two real Identity accounts can both log in successfully. The important test is what happens next: Alice creates a work item, Bob lists his work, and Alice's row must not appear.\n\nThat test separates four boundaries that are too often collapsed into a login form: identity, session, route authorization and resource scope.\n\nThe request never accepts an owner ID. Ownership comes from the authenticated name-identifier claim, and the EF Core query applies the owner predicate before materialization.\n\nThe framework handles password hashing and credential verification. Application code remains responsible for expressing and testing which resources the principal may use.\n\nDo your authentication tests include two users and an isolation assertion?",
+      "devArticle": "# Authentication Is More Than a Login Form\n\nA login screen answers only part of the security story. A useful authentication feature separates identity, session, authorization and resource scope.\n\n## Identity and session\n\nASP.NET Core Identity owns credential state, password hashing, security stamps, token support and lockout hooks. Its mapped API endpoints provide registration and login contracts. The returned session can be carried by a secure cookie or, as in this API-focused pilot, a bearer token.\n\n## Route authorization\n\nThe work-item route group calls `RequireAuthorization()`. Anonymous requests receive 401 before the feature handlers execute. This proves that some authenticated principal is present; it does not identify which work-item rows belong to that principal.\n\n## Server-derived ownership\n\nThe create request contains only a title. The endpoint reads the standard name-identifier claim and passes that trusted owner ID into the model. Accepting an owner ID from JSON would allow an authenticated caller to claim another account's scope.\n\nThe EF Core list query applies `Where(item => item.OwnerId == ownerId)` before materialization. A composite owner-and-time index supports that exact query shape.\n\n## Test isolation with two principals\n\nThe integration tests register and log in through the real Identity endpoints. One test proves anonymous create is rejected. The key test creates Alice and Bob, lets Alice create a private item, and asserts Bob's list excludes it. Both accounts are valid; resource scope is the boundary under test.\n\nProduction still needs confirmed email, recovery, MFA, safe session storage, rate limits, audit and revocation. Identity provides strong primitives. The application must still express and prove who may do what to which resource."
+    }
+  ]
+}
