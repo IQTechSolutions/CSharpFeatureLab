@@ -51,7 +51,8 @@
       "slug": "authorization-policies",
       "title": "Protect a Feature with Authorization Policies",
       "playlist": "Authentication & Authorization",
-      "status": "planned"
+      "checkpoint": "episode/04-authorization-policies",
+      "status": "release"
     },
     {
       "number": 5,
@@ -97,4 +98,3 @@
     }
   ]
 }
-

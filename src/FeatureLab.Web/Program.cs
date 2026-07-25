@@ -10,7 +10,14 @@ var connectionString = builder.Configuration.GetConnectionString("FeatureLab")
 
 builder.Services.AddDbContext<FeatureLabDbContext>(options =>
     options.UseSqlite(connectionString));
-builder.Services.AddAuthorization();
+builder.Services.AddAuthorizationBuilder()
+    .AddPolicy(
+        WorkItemAuthorization.CreatePolicy,
+        policy => policy
+            .RequireAuthenticatedUser()
+            .RequireClaim(
+                WorkItemAuthorization.PermissionClaimType,
+                WorkItemAuthorization.CreatePermission));
 builder.Services.AddIdentityApiEndpoints<FeatureLabUser>()
     .AddEntityFrameworkStores<FeatureLabDbContext>();
 builder.Services.AddScoped<IWorkItemStore, EfWorkItemStore>();
@@ -24,7 +31,7 @@ app.UseAuthorization();
 app.MapGet("/", () => Results.Ok(new
 {
     application = "C# Feature Lab",
-    lesson = "Build a complete vertical slice",
+    lesson = "Protect a feature with authorization policies",
 }));
 app.MapGroup("/account").MapIdentityApi<FeatureLabUser>();
 app.MapWorkItemEndpoints();

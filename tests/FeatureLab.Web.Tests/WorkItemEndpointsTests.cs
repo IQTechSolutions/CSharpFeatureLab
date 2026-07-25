@@ -1,9 +1,13 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Claims;
 using FeatureLab.Features.WorkItems;
+using FeatureLab.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace FeatureLab.Web.Tests;
 
@@ -19,7 +23,7 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
     [Fact]
     public async Task Create_returns_the_new_work_item()
     {
-        using var client = await CreateAuthenticatedClientAsync();
+        using var client = await CreateAuthenticatedClientAsync(canCreateWorkItems: true);
         var response = await client.PostAsJsonAsync("/api/work-items", new
         {
             title = "  Ship the first feature  ",
@@ -36,7 +40,7 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
     [Fact]
     public async Task Create_rejects_an_empty_title()
     {
-        using var client = await CreateAuthenticatedClientAsync();
+        using var client = await CreateAuthenticatedClientAsync(canCreateWorkItems: true);
         var response = await client.PostAsJsonAsync("/api/work-items", new
         {
             title = "  ",
@@ -48,7 +52,7 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
     [Fact]
     public async Task List_contains_a_created_work_item()
     {
-        using var client = await CreateAuthenticatedClientAsync();
+        using var client = await CreateAuthenticatedClientAsync(canCreateWorkItems: true);
         await client.PostAsJsonAsync("/api/work-items", new
         {
             title = "Prove the vertical slice",
@@ -74,15 +78,39 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
     }
 
     [Fact]
+    public async Task Create_forbids_an_authenticated_user_without_permission()
+    {
+        using var client = await CreateAuthenticatedClientAsync();
+
+        var response = await client.PostAsJsonAsync("/api/work-items", new
+        {
+            title = "This user is signed in but cannot create",
+        });
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task List_allows_an_authenticated_user_without_create_permission()
+    {
+        using var client = await CreateAuthenticatedClientAsync();
+
+        var response = await client.GetAsync("/api/work-items");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
     public async Task List_only_returns_the_authenticated_users_work_items()
     {
-        using var firstUser = await CreateAuthenticatedClientAsync();
-        using var secondUser = await CreateAuthenticatedClientAsync();
+        using var firstUser = await CreateAuthenticatedClientAsync(canCreateWorkItems: true);
+        using var secondUser = await CreateAuthenticatedClientAsync(canCreateWorkItems: true);
 
-        await firstUser.PostAsJsonAsync("/api/work-items", new
+        var createResponse = await firstUser.PostAsJsonAsync("/api/work-items", new
         {
             title = "First user's private work item",
         });
+        Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
 
         var secondUsersItems = await secondUser.GetFromJsonAsync<WorkItemResponse[]>("/api/work-items");
 
@@ -90,7 +118,7 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
         Assert.DoesNotContain(secondUsersItems, item => item.Title == "First user's private work item");
     }
 
-    private async Task<HttpClient> CreateAuthenticatedClientAsync()
+    private async Task<HttpClient> CreateAuthenticatedClientAsync(bool canCreateWorkItems = false)
     {
         var client = _factory.CreateClient();
         var email = $"learner-{Guid.NewGuid():N}@example.test";
@@ -102,6 +130,11 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
             password,
         });
         registration.EnsureSuccessStatusCode();
+
+        if (canCreateWorkItems)
+        {
+            await GrantCreatePermissionAsync(email);
+        }
 
         var login = await client.PostAsJsonAsync("/account/login", new
         {
@@ -116,6 +149,25 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
 
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", tokens.AccessToken);
         return client;
+    }
+
+    private async Task GrantCreatePermissionAsync(string email)
+    {
+        await using var scope = _factory.Services.CreateAsyncScope();
+        var userManager = scope.ServiceProvider.GetRequiredService<UserManager<FeatureLabUser>>();
+        var user = await userManager.FindByEmailAsync(email);
+
+        Assert.NotNull(user);
+
+        var result = await userManager.AddClaimAsync(
+            user,
+            new Claim(
+                WorkItemAuthorization.PermissionClaimType,
+                WorkItemAuthorization.CreatePermission));
+
+        Assert.True(
+            result.Succeeded,
+            string.Join("; ", result.Errors.Select(error => error.Description)));
     }
 }
 

@@ -16,23 +16,30 @@ public static class WorkItemEndpoints
             return Results.Ok(workItems.Select(WorkItemResponse.From));
         });
 
-        group.MapPost("/", async (CreateWorkItemRequest request, ClaimsPrincipal user, IWorkItemStore store, CancellationToken cancellationToken) =>
-        {
-            try
+        group.MapPost(
+            "/",
+            async (
+                CreateWorkItemRequest request,
+                ClaimsPrincipal user,
+                IWorkItemStore store,
+                CancellationToken cancellationToken) =>
             {
-                var workItem = WorkItem.Create(request.Title, RequiredOwnerId(user), TimeProvider.System);
-                await store.AddAsync(workItem, cancellationToken);
-
-                return Results.Created($"/api/work-items/{workItem.Id}", WorkItemResponse.From(workItem));
-            }
-            catch (ArgumentException exception)
-            {
-                return Results.ValidationProblem(new Dictionary<string, string[]>
+                try
                 {
-                    [nameof(request.Title)] = [exception.Message],
-                });
-            }
-        });
+                    var workItem = WorkItem.Create(request.Title, RequiredOwnerId(user), TimeProvider.System);
+                    await store.AddAsync(workItem, cancellationToken);
+
+                    return Results.Created($"/api/work-items/{workItem.Id}", WorkItemResponse.From(workItem));
+                }
+                catch (ArgumentException exception)
+                {
+                    return Results.ValidationProblem(new Dictionary<string, string[]>
+                    {
+                        [nameof(request.Title)] = [exception.Message],
+                    });
+                }
+            })
+            .RequireAuthorization(WorkItemAuthorization.CreatePolicy);
 
         return endpoints;
     }
