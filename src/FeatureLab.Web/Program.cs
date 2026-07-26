@@ -4,6 +4,7 @@ using FeatureLab.Features.WorkItems;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.WebHost.UseStaticWebAssets();
 
 var connectionString = builder.Configuration.GetConnectionString("FeatureLab")
     ?? "Data Source=app.db";
@@ -26,15 +27,18 @@ builder.Services.AddProblemDetails();
 var app = builder.Build();
 
 app.UseExceptionHandler();
+app.UseBlazorFrameworkFiles();
+app.UseStaticFiles();
 app.UseAuthentication();
 app.UseAuthorization();
-app.MapGet("/", () => Results.Ok(new
+app.MapGet("/api/about", () => Results.Ok(new
 {
     application = "C# Feature Lab",
-    lesson = "Protect a feature with authorization policies",
+    lesson = "Build a Blazor form that reports useful errors",
 }));
 app.MapGroup("/account").MapIdentityApi<FeatureLabUser>();
 app.MapWorkItemEndpoints();
+app.MapFallbackToFile("index.html");
 
 if (app.Environment.IsEnvironment("Testing"))
 {

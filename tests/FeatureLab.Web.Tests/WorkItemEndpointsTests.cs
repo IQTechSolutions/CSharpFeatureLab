@@ -118,6 +118,21 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
         Assert.DoesNotContain(secondUsersItems, item => item.Title == "First user's private work item");
     }
 
+    [Fact]
+    public async Task Blazor_host_serves_the_create_route()
+    {
+        using var client = _factory.CreateClient();
+
+        var response = await client.GetAsync("/work-items/new");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("text/html", response.Content.Headers.ContentType?.MediaType);
+        Assert.Contains(
+            "_framework/blazor.webassembly.js",
+            await response.Content.ReadAsStringAsync(),
+            StringComparison.Ordinal);
+    }
+
     private async Task<HttpClient> CreateAuthenticatedClientAsync(bool canCreateWorkItems = false)
     {
         var client = _factory.CreateClient();

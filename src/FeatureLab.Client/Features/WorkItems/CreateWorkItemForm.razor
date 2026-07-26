@@ -1,0 +1,99 @@
+@page "/work-items/new"
+@inject IWorkItemApi WorkItemApi
+
+<PageTitle>Create a work item</PageTitle>
+
+<section class="work-item-card">
+    <p class="eyebrow">C# Feature Lab</p>
+    <h1>Create a work item</h1>
+    <p class="intro">The API remains the source of truth for validation and permission checks.</p>
+
+    <EditForm Model="_form" OnSubmit="SubmitAsync">
+        <div class="field">
+            <label for="work-item-title">Title</label>
+            <input id="work-item-title"
+                   name="title"
+                   autocomplete="off"
+                   aria-invalid="@(_titleErrors.Count > 0 ? "true" : "false")"
+                   aria-describedby="title-errors"
+                   @bind="_form.Title" />
+            <div id="title-errors">
+                @foreach (var error in _titleErrors)
+                {
+                    <p class="field-error" data-testid="title-error">@error</p>
+                }
+            </div>
+        </div>
+
+        <button type="submit" disabled="@_isSubmitting">
+            @(_isSubmitting ? "Creating…" : "Create work item")
+        </button>
+    </EditForm>
+
+    @if (_createdTitle is not null)
+    {
+        <p class="success" role="status">Created “@_createdTitle”.</p>
+    }
+    @if (_statusMessage is not null)
+    {
+        <p class="error-summary" role="alert">@_statusMessage</p>
+    }
+</section>
+
+@code {
+    private readonly CreateWorkItemInput _form = new();
+    private bool _isSubmitting;
+    private string? _createdTitle;
+    private string? _statusMessage;
+    private IReadOnlyList<string> _titleErrors = [];
+
+    private async Task SubmitAsync(EditContext _)
+    {
+        _isSubmitting = true;
+        _createdTitle = null;
+        _statusMessage = null;
+        _titleErrors = [];
+
+        try
+        {
+            var result = await WorkItemApi.CreateAsync(_form.Title);
+            if (result is CreateWorkItemResult.CreatedResult created)
+            {
+                _createdTitle = created.Title;
+                _form.Title = string.Empty;
+            }
+            else if (result is CreateWorkItemResult.ValidationResult validation)
+            {
+                _titleErrors = validation.Errors
+                    .Where(error => string.Equals(
+                        error.Key,
+                        nameof(CreateWorkItemInput.Title),
+                        StringComparison.OrdinalIgnoreCase))
+                    .SelectMany(error => error.Value)
+                    .ToArray();
+            }
+            else if (result is CreateWorkItemResult.ForbiddenResult)
+            {
+                _statusMessage =
+                    "You are signed in, but you do not have permission to create work items.";
+            }
+            else if (result is CreateWorkItemResult.UnauthorizedResult)
+            {
+                _statusMessage = "Sign in before creating a work item.";
+            }
+            else if (result is CreateWorkItemResult.FailureResult)
+            {
+                _statusMessage = "We could not create the work item. Try again.";
+            }
+        }
+        finally
+        {
+            _isSubmitting = false;
+        }
+    }
+
+    private sealed class CreateWorkItemInput
+    {
+        public string Title { get; set; } = string.Empty;
+    }
+}

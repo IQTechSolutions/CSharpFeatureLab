@@ -59,7 +59,8 @@
       "slug": "blazor-create-form",
       "title": "Build a Blazor Form That Reports Useful Errors",
       "playlist": "Blazor",
-      "status": "planned"
+      "checkpoint": "episode/05-blazor-create-form",
+      "status": "release"
     },
     {
       "number": 6,

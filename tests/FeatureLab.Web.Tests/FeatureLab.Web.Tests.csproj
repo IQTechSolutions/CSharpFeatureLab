@@ -1,10 +1,12 @@
-<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk.Razor">
   <PropertyGroup>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="AngleSharp" Version="1.5.2" />
+    <PackageReference Include="bunit" Version="2.7.2" />
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.9" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.5.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
@@ -15,6 +17,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="../../src/FeatureLab.Client/FeatureLab.Client.csproj" />
     <ProjectReference Include="../../src/FeatureLab.Web/FeatureLab.Web.csproj" />
   </ItemGroup>
 
@@ -22,4 +25,3 @@
     <Using Include="Xunit" />
   </ItemGroup>
 </Project>
-

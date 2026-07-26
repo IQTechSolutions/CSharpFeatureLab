@@ -1,9 +1,9 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/FeatureLab.Client/FeatureLab.Client.csproj" />
     <Project Path="src/FeatureLab.Web/FeatureLab.Web.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/FeatureLab.Web.Tests/FeatureLab.Web.Tests.csproj" />
   </Folder>
 </Solution>
-
