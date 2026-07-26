@@ -67,7 +67,8 @@
       "slug": "ef-core-concurrency",
       "title": "Stop Lost Updates with EF Core Concurrency",
       "playlist": "EF Core",
-      "status": "planned"
+      "checkpoint": "episode/06-ef-core-concurrency",
+      "status": "release"
     },
     {
       "number": 7,

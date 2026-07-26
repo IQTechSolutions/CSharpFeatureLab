@@ -26,6 +26,9 @@ public sealed class FeatureLabDbContext(DbContextOptions<FeatureLabDbContext> op
         workItem.Property(item => item.OwnerId)
             .HasMaxLength(450)
             .IsRequired();
+        workItem.Property(item => item.Version)
+            .IsConcurrencyToken()
+            .IsRequired();
         workItem.HasIndex(item => new { item.OwnerId, item.CreatedAtUtc });
         workItem.HasIndex(item => item.CreatedAtUtc);
     }

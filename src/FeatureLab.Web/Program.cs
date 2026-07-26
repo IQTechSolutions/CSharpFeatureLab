@@ -34,7 +34,7 @@ app.UseAuthorization();
 app.MapGet("/api/about", () => Results.Ok(new
 {
     application = "C# Feature Lab",
-    lesson = "Build a Blazor form that reports useful errors",
+    lesson = "Stop lost updates with EF Core concurrency",
 }));
 app.MapGroup("/account").MapIdentityApi<FeatureLabUser>();
 app.MapWorkItemEndpoints();

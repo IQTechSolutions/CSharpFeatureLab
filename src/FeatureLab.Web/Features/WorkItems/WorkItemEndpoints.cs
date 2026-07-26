@@ -41,6 +41,56 @@ public static class WorkItemEndpoints
             })
             .RequireAuthorization(WorkItemAuthorization.CreatePolicy);
 
+        group.MapPut(
+            "/{id:guid}/title",
+            async (
+                Guid id,
+                UpdateWorkItemTitleRequest request,
+                ClaimsPrincipal user,
+                IWorkItemStore store,
+                CancellationToken cancellationToken) =>
+            {
+                if (request.Version < 1)
+                {
+                    return Results.ValidationProblem(new Dictionary<string, string[]>
+                    {
+                        [nameof(request.Version)] = ["Version must be 1 or greater."],
+                    });
+                }
+
+                try
+                {
+                    var result = await store.UpdateTitleAsync(
+                        id,
+                        RequiredOwnerId(user),
+                        request.Title,
+                        request.Version,
+                        cancellationToken);
+
+                    return result switch
+                    {
+                        UpdateWorkItemResult.UpdatedResult updated =>
+                            Results.Ok(WorkItemResponse.From(updated.WorkItem)),
+                        UpdateWorkItemResult.NotFoundResult =>
+                            Results.NotFound(),
+                        UpdateWorkItemResult.ConflictResult =>
+                            Results.Problem(
+                                statusCode: StatusCodes.Status409Conflict,
+                                title: "The work item changed before this update was saved.",
+                                detail: "Reload the work item and try your change again."),
+                        _ => throw new InvalidOperationException(
+                            "The work item update returned an unknown result."),
+                    };
+                }
+                catch (ArgumentException exception)
+                {
+                    return Results.ValidationProblem(new Dictionary<string, string[]>
+                    {
+                        [nameof(request.Title)] = [exception.Message],
+                    });
+                }
+            });
+
         return endpoints;
     }
 
@@ -51,8 +101,20 @@ public static class WorkItemEndpoints
 
 public sealed record CreateWorkItemRequest(string Title);
 
-public sealed record WorkItemResponse(Guid Id, string Title, bool IsCompleted, DateTime CreatedAtUtc)
+public sealed record UpdateWorkItemTitleRequest(string Title, int Version);
+
+public sealed record WorkItemResponse(
+    Guid Id,
+    string Title,
+    bool IsCompleted,
+    DateTime CreatedAtUtc,
+    int Version)
 {
     public static WorkItemResponse From(WorkItem workItem) =>
-        new(workItem.Id, workItem.Title, workItem.IsCompleted, workItem.CreatedAtUtc);
+        new(
+            workItem.Id,
+            workItem.Title,
+            workItem.IsCompleted,
+            workItem.CreatedAtUtc,
+            workItem.Version);
 }

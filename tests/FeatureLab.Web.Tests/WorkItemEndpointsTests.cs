@@ -35,6 +35,7 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
         Assert.NotNull(created);
         Assert.Equal("Ship the first feature", created.Title);
         Assert.NotEqual(Guid.Empty, created.Id);
+        Assert.Equal(1, created.Version);
     }
 
     [Fact]
@@ -119,6 +120,120 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
     }
 
     [Fact]
+    public async Task Update_renames_the_work_item_and_advances_its_version()
+    {
+        using var client = await CreateAuthenticatedClientAsync(canCreateWorkItems: true);
+        var created = await CreateWorkItemAsync(client, "Original title");
+
+        var response = await client.PutAsJsonAsync(
+            $"/api/work-items/{created.Id}/title",
+            new
+            {
+                title = "  Updated title  ",
+                version = created.Version,
+            });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+
+        var updated = await response.Content.ReadFromJsonAsync<WorkItemResponse>();
+        Assert.NotNull(updated);
+        Assert.Equal("Updated title", updated.Title);
+        Assert.Equal(created.Version + 1, updated.Version);
+    }
+
+    [Fact]
+    public async Task Update_rejects_a_stale_version_without_losing_the_winning_change()
+    {
+        using var client = await CreateAuthenticatedClientAsync(canCreateWorkItems: true);
+        var created = await CreateWorkItemAsync(client, "Original title");
+
+        var winningResponse = await client.PutAsJsonAsync(
+            $"/api/work-items/{created.Id}/title",
+            new
+            {
+                title = "First editor wins",
+                version = created.Version,
+            });
+        Assert.Equal(HttpStatusCode.OK, winningResponse.StatusCode);
+
+        var staleResponse = await client.PutAsJsonAsync(
+            $"/api/work-items/{created.Id}/title",
+            new
+            {
+                title = "Stale editor overwrites",
+                version = created.Version,
+            });
+
+        Assert.Equal(HttpStatusCode.Conflict, staleResponse.StatusCode);
+        Assert.Contains(
+            "Reload the work item",
+            await staleResponse.Content.ReadAsStringAsync(),
+            StringComparison.Ordinal);
+
+        var items = await client.GetFromJsonAsync<WorkItemResponse[]>("/api/work-items");
+        var saved = Assert.Single(items!, item => item.Id == created.Id);
+        Assert.Equal("First editor wins", saved.Title);
+        Assert.Equal(created.Version + 1, saved.Version);
+    }
+
+    [Fact]
+    public async Task Update_hides_another_users_work_item()
+    {
+        using var owner = await CreateAuthenticatedClientAsync(canCreateWorkItems: true);
+        using var otherUser = await CreateAuthenticatedClientAsync();
+        var created = await CreateWorkItemAsync(owner, "Owner-only edit");
+
+        var response = await otherUser.PutAsJsonAsync(
+            $"/api/work-items/{created.Id}/title",
+            new
+            {
+                title = "Another user's edit",
+                version = created.Version,
+            });
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Update_rejects_an_invalid_version()
+    {
+        using var client = await CreateAuthenticatedClientAsync(canCreateWorkItems: true);
+        var created = await CreateWorkItemAsync(client, "Versioned item");
+
+        var response = await client.PutAsJsonAsync(
+            $"/api/work-items/{created.Id}/title",
+            new
+            {
+                title = "Invalid version",
+                version = 0,
+            });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Update_rejects_an_invalid_title_without_changing_the_work_item()
+    {
+        using var client = await CreateAuthenticatedClientAsync(canCreateWorkItems: true);
+        var created = await CreateWorkItemAsync(client, "Original valid title");
+
+        var response = await client.PutAsJsonAsync(
+            $"/api/work-items/{created.Id}/title",
+            new
+            {
+                title = "x",
+                version = created.Version,
+            });
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+
+        var items = await client.GetFromJsonAsync<WorkItemResponse[]>("/api/work-items");
+        var saved = Assert.Single(items!, item => item.Id == created.Id);
+        Assert.Equal("Original valid title", saved.Title);
+        Assert.Equal(created.Version, saved.Version);
+    }
+
+    [Fact]
     public async Task Blazor_host_serves_the_create_route()
     {
         using var client = _factory.CreateClient();
@@ -164,6 +279,20 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
 
         client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", tokens.AccessToken);
         return client;
+    }
+
+    private static async Task<WorkItemResponse> CreateWorkItemAsync(
+        HttpClient client,
+        string title)
+    {
+        var response = await client.PostAsJsonAsync("/api/work-items", new
+        {
+            title,
+        });
+        response.EnsureSuccessStatusCode();
+
+        var created = await response.Content.ReadFromJsonAsync<WorkItemResponse>();
+        return Assert.IsType<WorkItemResponse>(created);
     }
 
     private async Task GrantCreatePermissionAsync(string email)
