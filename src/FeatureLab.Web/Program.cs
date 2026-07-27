@@ -1,4 +1,5 @@
 using FeatureLab.Data;
+using FeatureLab.Features.Chat;
 using FeatureLab.Identity;
 using FeatureLab.Features.WorkItems;
 using Microsoft.EntityFrameworkCore;
@@ -23,6 +24,11 @@ builder.Services.AddIdentityApiEndpoints<FeatureLabUser>()
     .AddEntityFrameworkStores<FeatureLabDbContext>();
 builder.Services.AddScoped<IWorkItemStore, EfWorkItemStore>();
 builder.Services.AddProblemDetails();
+builder.Services.AddSignalR(options =>
+{
+    options.MaximumReceiveMessageSize = 4 * 1024;
+    options.MaximumParallelInvocationsPerClient = 1;
+});
 
 var app = builder.Build();
 
@@ -34,10 +40,11 @@ app.UseAuthorization();
 app.MapGet("/api/about", () => Results.Ok(new
 {
     application = "C# Feature Lab",
-    lesson = "Stop lost updates with EF Core concurrency",
+    lesson = "Build the first working SignalR chat slice",
 }));
 app.MapGroup("/account").MapIdentityApi<FeatureLabUser>();
 app.MapWorkItemEndpoints();
+app.MapHub<ChatHub>(ChatHub.Route);
 app.MapFallbackToFile("index.html");
 
 if (app.Environment.IsEnvironment("Testing"))

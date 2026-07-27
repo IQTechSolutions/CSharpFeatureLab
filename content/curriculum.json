@@ -75,7 +75,8 @@
       "slug": "signalr-chat-first-slice",
       "title": "Build the First Working SignalR Chat Slice",
       "playlist": "Real-time Chat",
-      "status": "planned"
+      "checkpoint": "episode/07-signalr-chat-first-slice",
+      "status": "release"
     },
     {
       "number": 8,
