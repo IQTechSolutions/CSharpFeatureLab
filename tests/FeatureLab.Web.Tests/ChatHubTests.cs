@@ -58,8 +58,8 @@ public sealed class ChatHubTests : IClassFixture<FeatureLabWebFactory>
     [Fact]
     public async Task SendMessage_rejects_invalid_text_with_a_safe_error()
     {
-        var accessToken = await RegisterAndGetAccessTokenAsync();
-        await using var connection = CreateConnection(accessToken);
+        var bearerValue = await RegisterAndGetAccessTokenAsync();
+        await using var connection = CreateConnection(bearerValue);
         await connection.StartAsync();
 
         var error = await Assert.ThrowsAsync<HubException>(
