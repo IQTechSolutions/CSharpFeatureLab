@@ -1,9 +1,12 @@
 using System.Net;
 using System.Net.Http.Json;
+using FeatureLab.Data;
 using FeatureLab.Features.Chat;
 using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.SignalR.Client;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace FeatureLab.Web.Tests;
 
@@ -71,6 +74,44 @@ public sealed class ChatHubTests : IClassFixture<FeatureLabWebFactory>
             StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task RecentMessages_returns_server_authored_history_to_a_later_connection()
+    {
+        var sender = await RegisterMemberAsync();
+        await using var sendingConnection = CreateConnection(sender.AccessToken);
+        var received = MessageReceivedBy(sendingConnection);
+        await sendingConnection.StartAsync();
+
+        var uniqueText = $"Persist this message {Guid.NewGuid():N}";
+        await sendingConnection.InvokeAsync("SendMessage", uniqueText);
+        var liveMessage = await received.WaitAsync(TimeSpan.FromSeconds(5));
+        await sendingConnection.StopAsync();
+
+        await using (var scope = _factory.Services.CreateAsyncScope())
+        {
+            var dbContext = scope.ServiceProvider
+                .GetRequiredService<FeatureLabDbContext>();
+            var stored = await dbContext.ChatMessages
+                .AsNoTracking()
+                .SingleAsync(message => message.Id == liveMessage.Id);
+
+            Assert.Equal(sender.UserId, stored.AuthorId);
+            Assert.Equal(liveMessage, stored.ToMessage());
+        }
+
+        var readerToken = await RegisterAndGetAccessTokenAsync();
+        await using var readingConnection = CreateConnection(readerToken);
+        await readingConnection.StartAsync();
+
+        var history = await readingConnection
+            .InvokeAsync<ChatMessage[]>("GetRecentMessages");
+        var replayedMessage = Assert.Single(
+            history,
+            message => message.Id == liveMessage.Id);
+
+        Assert.Equal(liveMessage, replayedMessage);
+    }
+
     private HubConnection CreateConnection(string accessToken) =>
         new HubConnectionBuilder()
             .WithUrl(
@@ -99,6 +140,12 @@ public sealed class ChatHubTests : IClassFixture<FeatureLabWebFactory>
 
     private async Task<string> RegisterAndGetAccessTokenAsync()
     {
+        var member = await RegisterMemberAsync();
+        return member.AccessToken;
+    }
+
+    private async Task<RegisteredMember> RegisterMemberAsync()
+    {
         using var client = _factory.CreateClient();
         var email = $"chat-learner-{Guid.NewGuid():N}@example.test";
         const string password = "FeatureLab!123";
@@ -121,6 +168,18 @@ public sealed class ChatHubTests : IClassFixture<FeatureLabWebFactory>
         Assert.NotNull(tokens);
         Assert.False(string.IsNullOrWhiteSpace(tokens.AccessToken));
 
-        return tokens.AccessToken;
+        await using var scope = _factory.Services.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider
+            .GetRequiredService<FeatureLabDbContext>();
+        var userId = await dbContext.Users
+            .Where(user => user.Email == email)
+            .Select(user => user.Id)
+            .SingleAsync();
+
+        return new RegisteredMember(tokens.AccessToken, userId);
     }
+
+    private sealed record RegisteredMember(
+        string AccessToken,
+        string UserId);
 }

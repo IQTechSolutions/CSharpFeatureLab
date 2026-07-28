@@ -1,3 +1,4 @@
+using FeatureLab.Features.Chat;
 using FeatureLab.Features.WorkItems;
 using FeatureLab.Identity;
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
@@ -8,11 +9,34 @@ namespace FeatureLab.Data;
 public sealed class FeatureLabDbContext(DbContextOptions<FeatureLabDbContext> options)
     : IdentityDbContext<FeatureLabUser>(options)
 {
+    public DbSet<PersistedChatMessage> ChatMessages => Set<PersistedChatMessage>();
+
     public DbSet<WorkItem> WorkItems => Set<WorkItem>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
+
+        var chatMessage = modelBuilder.Entity<PersistedChatMessage>();
+
+        chatMessage.ToTable("ChatMessages");
+        chatMessage.HasKey(message => message.Id);
+        chatMessage.Property(message => message.AuthorId)
+            .HasMaxLength(450)
+            .IsRequired();
+        chatMessage.Property(message => message.Sender)
+            .HasMaxLength(80)
+            .IsRequired();
+        chatMessage.Property(message => message.Text)
+            .HasMaxLength(ChatHub.MaximumMessageLength)
+            .IsRequired();
+        chatMessage.Property(message => message.SentAtUtc)
+            .IsRequired();
+        chatMessage.HasIndex(message => new
+        {
+            message.SentAtUtc,
+            message.Id,
+        });
 
         var workItem = modelBuilder.Entity<WorkItem>();
 

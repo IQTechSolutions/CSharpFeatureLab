@@ -83,7 +83,8 @@
       "slug": "chat-persistence",
       "title": "Persist Chat Messages Without Trusting the Client",
       "playlist": "Real-time Chat",
-      "status": "planned"
+      "checkpoint": "episode/08-chat-persistence",
+      "status": "release"
     },
     {
       "number": 9,

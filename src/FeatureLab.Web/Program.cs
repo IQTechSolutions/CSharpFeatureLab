@@ -22,6 +22,7 @@ builder.Services.AddAuthorizationBuilder()
                 WorkItemAuthorization.CreatePermission));
 builder.Services.AddIdentityApiEndpoints<FeatureLabUser>()
     .AddEntityFrameworkStores<FeatureLabDbContext>();
+builder.Services.AddScoped<IChatMessageStore, EfChatMessageStore>();
 builder.Services.AddScoped<IWorkItemStore, EfWorkItemStore>();
 builder.Services.AddProblemDetails();
 builder.Services.AddSignalR(options =>
@@ -40,7 +41,7 @@ app.UseAuthorization();
 app.MapGet("/api/about", () => Results.Ok(new
 {
     application = "C# Feature Lab",
-    lesson = "Build the first working SignalR chat slice",
+    lesson = "Persist chat messages without trusting the client",
 }));
 app.MapGroup("/account").MapIdentityApi<FeatureLabUser>();
 app.MapWorkItemEndpoints();
