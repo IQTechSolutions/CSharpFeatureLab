@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using FeatureLab.Features.BackgroundJobs;
 
 namespace FeatureLab.Features.WorkItems;
 
@@ -91,6 +92,51 @@ public static class WorkItemEndpoints
                 }
             });
 
+        group.MapPost(
+            "/{id:guid}/reports",
+            async (
+                Guid id,
+                ClaimsPrincipal user,
+                IWorkItemReportService reports,
+                IWorkItemReportScheduler scheduler,
+                CancellationToken cancellationToken) =>
+            {
+                var report = await reports.RequestAsync(
+                    id,
+                    RequiredOwnerId(user),
+                    cancellationToken);
+
+                if (report is null)
+                {
+                    return Results.NotFound();
+                }
+
+                var jobId = scheduler.Enqueue(report.Id);
+                return Results.Accepted(
+                    $"/api/work-items/reports/{report.Id}",
+                    new WorkItemReportAcceptedResponse(
+                        jobId,
+                        WorkItemReportResponse.From(report)));
+            });
+
+        group.MapGet(
+            "/reports/{reportId:guid}",
+            async (
+                Guid reportId,
+                ClaimsPrincipal user,
+                IWorkItemReportService reports,
+                CancellationToken cancellationToken) =>
+            {
+                var report = await reports.FindAsync(
+                    reportId,
+                    RequiredOwnerId(user),
+                    cancellationToken);
+
+                return report is null
+                    ? Results.NotFound()
+                    : Results.Ok(WorkItemReportResponse.From(report));
+            });
+
         return endpoints;
     }
 
@@ -102,6 +148,28 @@ public static class WorkItemEndpoints
 public sealed record CreateWorkItemRequest(string Title);
 
 public sealed record UpdateWorkItemTitleRequest(string Title, int Version);
+
+public sealed record WorkItemReportAcceptedResponse(
+    string JobId,
+    WorkItemReportResponse Report);
+
+public sealed record WorkItemReportResponse(
+    Guid Id,
+    Guid WorkItemId,
+    string Status,
+    string? Content,
+    DateTime RequestedAtUtc,
+    DateTime? CompletedAtUtc)
+{
+    public static WorkItemReportResponse From(WorkItemReport report) =>
+        new(
+            report.Id,
+            report.WorkItemId,
+            report.CompletedAtUtc is null ? "Pending" : "Completed",
+            report.Content,
+            report.RequestedAtUtc,
+            report.CompletedAtUtc);
+}
 
 public sealed record WorkItemResponse(
     Guid Id,

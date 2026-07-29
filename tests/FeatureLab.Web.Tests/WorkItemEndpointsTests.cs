@@ -2,12 +2,14 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Claims;
+using FeatureLab.Features.BackgroundJobs;
 using FeatureLab.Features.WorkItems;
 using FeatureLab.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace FeatureLab.Web.Tests;
 
@@ -325,6 +327,13 @@ public sealed class FeatureLabWebFactory : WebApplicationFactory<Program>
     {
         builder.UseEnvironment("Testing");
         builder.UseSetting("ConnectionStrings:FeatureLab", $"Data Source={_databasePath};Pooling=False");
+        builder.ConfigureServices(services =>
+        {
+            services.RemoveAll<IWorkItemReportScheduler>();
+            services.AddSingleton<RecordingWorkItemReportScheduler>();
+            services.AddSingleton<IWorkItemReportScheduler>(
+                provider => provider.GetRequiredService<RecordingWorkItemReportScheduler>());
+        });
     }
 
     protected override void Dispose(bool disposing)

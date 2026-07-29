@@ -3,6 +3,7 @@ using System;
 using FeatureLab.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -10,9 +11,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace FeatureLab.Data.Migrations
 {
     [DbContext(typeof(FeatureLabDbContext))]
-    partial class FeatureLabDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260729211126_AddWorkItemReports")]
+    partial class AddWorkItemReports
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.9");

@@ -1,7 +1,9 @@
 using FeatureLab.Data;
+using FeatureLab.Features.BackgroundJobs;
 using FeatureLab.Features.Chat;
 using FeatureLab.Identity;
 using FeatureLab.Features.WorkItems;
+using Hangfire;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -22,6 +24,35 @@ builder.Services.AddAuthorizationBuilder()
                 WorkItemAuthorization.CreatePermission));
 builder.Services.AddIdentityApiEndpoints<FeatureLabUser>()
     .AddEntityFrameworkStores<FeatureLabDbContext>();
+builder.Services.AddHangfire(configuration =>
+{
+    configuration
+        .SetDataCompatibilityLevel(CompatibilityLevel.Version_180)
+        .UseSimpleAssemblyNameTypeSerializer()
+        .UseRecommendedSerializerSettings();
+
+    if (builder.Environment.IsDevelopment()
+        || builder.Environment.IsEnvironment("Testing"))
+    {
+        configuration.UseInMemoryStorage();
+        return;
+    }
+
+    var backgroundJobsConnectionString =
+        builder.Configuration.GetConnectionString("BackgroundJobs")
+        ?? throw new InvalidOperationException(
+            "A SQL Server BackgroundJobs connection string is required outside Development and Testing.");
+
+    configuration.UseSqlServerStorage(backgroundJobsConnectionString);
+});
+if (!builder.Environment.IsEnvironment("Testing"))
+{
+    builder.Services.AddHangfireServer();
+}
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddScoped<IWorkItemReportService, EfWorkItemReportService>();
+builder.Services.AddScoped<WorkItemReportJob>();
+builder.Services.AddSingleton<IWorkItemReportScheduler, HangfireWorkItemReportScheduler>();
 builder.Services.AddScoped<IChatMessageStore, EfChatMessageStore>();
 builder.Services.AddScoped<IWorkItemStore, EfWorkItemStore>();
 builder.Services.AddProblemDetails();
@@ -41,7 +72,7 @@ app.UseAuthorization();
 app.MapGet("/api/about", () => Results.Ok(new
 {
     application = "C# Feature Lab",
-    lesson = "Persist chat messages without trusting the client",
+    lesson = "Move slow work into a reliable background job",
 }));
 app.MapGroup("/account").MapIdentityApi<FeatureLabUser>();
 app.MapWorkItemEndpoints();

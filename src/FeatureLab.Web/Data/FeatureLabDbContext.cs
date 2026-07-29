@@ -1,3 +1,4 @@
+using FeatureLab.Features.BackgroundJobs;
 using FeatureLab.Features.Chat;
 using FeatureLab.Features.WorkItems;
 using FeatureLab.Identity;
@@ -10,6 +11,8 @@ public sealed class FeatureLabDbContext(DbContextOptions<FeatureLabDbContext> op
     : IdentityDbContext<FeatureLabUser>(options)
 {
     public DbSet<PersistedChatMessage> ChatMessages => Set<PersistedChatMessage>();
+
+    public DbSet<WorkItemReport> WorkItemReports => Set<WorkItemReport>();
 
     public DbSet<WorkItem> WorkItems => Set<WorkItem>();
 
@@ -55,5 +58,26 @@ public sealed class FeatureLabDbContext(DbContextOptions<FeatureLabDbContext> op
             .IsRequired();
         workItem.HasIndex(item => new { item.OwnerId, item.CreatedAtUtc });
         workItem.HasIndex(item => item.CreatedAtUtc);
+
+        var workItemReport = modelBuilder.Entity<WorkItemReport>();
+
+        workItemReport.ToTable("WorkItemReports");
+        workItemReport.HasKey(report => report.Id);
+        workItemReport.Property(report => report.OwnerId)
+            .HasMaxLength(450)
+            .IsRequired();
+        workItemReport.Property(report => report.RequestedAtUtc)
+            .IsRequired();
+        workItemReport.Property(report => report.Content)
+            .HasMaxLength(500);
+        workItemReport.HasIndex(report => new
+        {
+            report.OwnerId,
+            report.RequestedAtUtc,
+        });
+        workItemReport.HasOne<WorkItem>()
+            .WithMany()
+            .HasForeignKey(report => report.WorkItemId)
+            .OnDelete(DeleteBehavior.Cascade);
     }
 }
