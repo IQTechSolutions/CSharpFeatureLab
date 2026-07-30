@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using FeatureLab.Features.BackgroundJobs;
+using FeatureLab.Tenancy;
 
 namespace FeatureLab.Features.WorkItems;
 
@@ -8,7 +9,7 @@ public static class WorkItemEndpoints
     public static IEndpointRouteBuilder MapWorkItemEndpoints(this IEndpointRouteBuilder endpoints)
     {
         var group = endpoints.MapGroup("/api/work-items")
-            .RequireAuthorization();
+            .RequireAuthorization(TenantMembership.Policy);
 
         group.MapGet("/", async (ClaimsPrincipal user, IWorkItemStore store, CancellationToken cancellationToken) =>
         {
@@ -22,12 +23,17 @@ public static class WorkItemEndpoints
             async (
                 CreateWorkItemRequest request,
                 ClaimsPrincipal user,
+                ITenantContext tenant,
                 IWorkItemStore store,
                 CancellationToken cancellationToken) =>
             {
                 try
                 {
-                    var workItem = WorkItem.Create(request.Title, RequiredOwnerId(user), TimeProvider.System);
+                    var workItem = WorkItem.Create(
+                        request.Title,
+                        RequiredOwnerId(user),
+                        tenant.Id,
+                        TimeProvider.System);
                     await store.AddAsync(workItem, cancellationToken);
 
                     return Results.Created($"/api/work-items/{workItem.Id}", WorkItemResponse.From(workItem));
@@ -97,6 +103,7 @@ public static class WorkItemEndpoints
             async (
                 Guid id,
                 ClaimsPrincipal user,
+                ITenantContext tenant,
                 IWorkItemReportService reports,
                 IWorkItemReportScheduler scheduler,
                 CancellationToken cancellationToken) =>
@@ -111,7 +118,7 @@ public static class WorkItemEndpoints
                     return Results.NotFound();
                 }
 
-                var jobId = scheduler.Enqueue(report.Id);
+                var jobId = scheduler.Enqueue(tenant.Id, report.Id);
                 return Results.Accepted(
                     $"/api/work-items/reports/{report.Id}",
                     new WorkItemReportAcceptedResponse(

@@ -1,4 +1,5 @@
 using FeatureLab.Data;
+using FeatureLab.Tenancy;
 using Microsoft.EntityFrameworkCore;
 
 namespace FeatureLab.Features.WorkItems;
@@ -17,11 +18,19 @@ public interface IWorkItemStore
         CancellationToken cancellationToken);
 }
 
-public sealed class EfWorkItemStore(FeatureLabDbContext dbContext) : IWorkItemStore
+public sealed class EfWorkItemStore(
+    FeatureLabDbContext dbContext,
+    ITenantContext tenant) : IWorkItemStore
 {
     public async Task<WorkItem> AddAsync(WorkItem workItem, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(workItem);
+
+        if (workItem.TenantId != tenant.Id)
+        {
+            throw new InvalidOperationException(
+                "The work item belongs to a different tenant scope.");
+        }
 
         dbContext.WorkItems.Add(workItem);
         await dbContext.SaveChangesAsync(cancellationToken);

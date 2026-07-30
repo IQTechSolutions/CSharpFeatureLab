@@ -5,6 +5,7 @@ using System.Security.Claims;
 using FeatureLab.Features.BackgroundJobs;
 using FeatureLab.Features.WorkItems;
 using FeatureLab.Identity;
+using FeatureLab.Tenancy;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Identity;
@@ -104,6 +105,70 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
     }
 
     [Fact]
+    public async Task List_forbids_an_authenticated_user_without_tenant_membership()
+    {
+        using var client = await CreateAuthenticatedClientAsync(hasTenantMembership: false);
+
+        var response = await client.GetAsync("/api/work-items");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Registration_provisions_a_server_owned_tenant_membership()
+    {
+        using var client = _factory.CreateClient();
+        var email = $"new-member-{Guid.NewGuid():N}@example.test";
+        const string password = "FeatureLab!123";
+
+        var registration = await client.PostAsJsonAsync("/account/register", new
+        {
+            email,
+            password,
+        });
+        registration.EnsureSuccessStatusCode();
+
+        var login = await client.PostAsJsonAsync("/account/login", new
+        {
+            email,
+            password,
+        });
+        login.EnsureSuccessStatusCode();
+        var tokens = await login.Content.ReadFromJsonAsync<LoginTokenResponse>();
+        Assert.NotNull(tokens);
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", tokens.AccessToken);
+
+        var response = await client.GetAsync("/api/work-items");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task List_forbids_an_ambiguous_tenant_principal()
+    {
+        var email = $"ambiguous-member-{Guid.NewGuid():N}@example.test";
+        const string password = "FeatureLab!123";
+        using var registrationClient = _factory.CreateClient();
+        var registration = await registrationClient.PostAsJsonAsync("/account/register", new
+        {
+            email,
+            password,
+        });
+        registration.EnsureSuccessStatusCode();
+        await GrantClaimAsync(
+            email,
+            new Claim(
+                TenantMembership.ClaimType,
+                Guid.NewGuid().ToString()));
+        using var client = await SignInAsync(email, password);
+
+        var response = await client.GetAsync("/api/work-items");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
     public async Task List_only_returns_the_authenticated_users_work_items()
     {
         using var firstUser = await CreateAuthenticatedClientAsync(canCreateWorkItems: true);
@@ -119,6 +184,28 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
 
         Assert.NotNull(secondUsersItems);
         Assert.DoesNotContain(secondUsersItems, item => item.Title == "First user's private work item");
+    }
+
+    [Fact]
+    public async Task List_hides_the_same_users_work_items_from_another_tenant()
+    {
+        var clients = await CreateClientsForSameUserInDifferentTenantsAsync();
+        using var firstTenant = clients.FirstTenant;
+        using var secondTenant = clients.SecondTenant;
+        var title = $"Tenant A item {Guid.NewGuid():N}";
+
+        var createResponse = await firstTenant.PostAsJsonAsync("/api/work-items", new
+        {
+            title,
+            tenantId = clients.SecondTenantId,
+        });
+        Assert.Equal(HttpStatusCode.Created, createResponse.StatusCode);
+
+        var secondTenantItems =
+            await secondTenant.GetFromJsonAsync<WorkItemResponse[]>("/api/work-items");
+
+        Assert.NotNull(secondTenantItems);
+        Assert.DoesNotContain(secondTenantItems, item => item.Title == title);
     }
 
     [Fact]
@@ -197,6 +284,54 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
     }
 
     [Fact]
+    public async Task Update_hides_the_same_users_work_item_from_another_tenant()
+    {
+        var clients = await CreateClientsForSameUserInDifferentTenantsAsync();
+        using var firstTenant = clients.FirstTenant;
+        using var secondTenant = clients.SecondTenant;
+        var created = await CreateWorkItemAsync(
+            firstTenant,
+            "Tenant A edit boundary");
+
+        var response = await secondTenant.PutAsJsonAsync(
+            $"/api/work-items/{created.Id}/title",
+            new
+            {
+                title = "Tenant B edit",
+                version = created.Version,
+            });
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Reports_hide_the_same_users_resources_from_another_tenant()
+    {
+        var clients = await CreateClientsForSameUserInDifferentTenantsAsync();
+        using var firstTenant = clients.FirstTenant;
+        using var secondTenant = clients.SecondTenant;
+        var created = await CreateWorkItemAsync(
+            firstTenant,
+            "Tenant A report boundary");
+        var reportRequest = await firstTenant.PostAsync(
+            $"/api/work-items/{created.Id}/reports",
+            content: null);
+        reportRequest.EnsureSuccessStatusCode();
+        var accepted =
+            await reportRequest.Content.ReadFromJsonAsync<WorkItemReportAcceptedResponse>();
+        Assert.NotNull(accepted);
+
+        var requestFromAnotherTenant = await secondTenant.PostAsync(
+            $"/api/work-items/{created.Id}/reports",
+            content: null);
+        var statusFromAnotherTenant = await secondTenant.GetAsync(
+            $"/api/work-items/reports/{accepted.Report.Id}");
+
+        Assert.Equal(HttpStatusCode.NotFound, requestFromAnotherTenant.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, statusFromAnotherTenant.StatusCode);
+    }
+
+    [Fact]
     public async Task Update_rejects_an_invalid_version()
     {
         using var client = await CreateAuthenticatedClientAsync(canCreateWorkItems: true);
@@ -250,7 +385,9 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
             StringComparison.Ordinal);
     }
 
-    private async Task<HttpClient> CreateAuthenticatedClientAsync(bool canCreateWorkItems = false)
+    private async Task<HttpClient> CreateAuthenticatedClientAsync(
+        bool canCreateWorkItems = false,
+        bool hasTenantMembership = true)
     {
         var client = _factory.CreateClient();
         var email = $"learner-{Guid.NewGuid():N}@example.test";
@@ -263,9 +400,18 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
         });
         registration.EnsureSuccessStatusCode();
 
+        if (!hasTenantMembership)
+        {
+            await AssignTenantAsync(email, Guid.Empty);
+        }
+
         if (canCreateWorkItems)
         {
-            await GrantCreatePermissionAsync(email);
+            await GrantClaimAsync(
+                email,
+                new Claim(
+                    WorkItemAuthorization.PermissionClaimType,
+                    WorkItemAuthorization.CreatePermission));
         }
 
         var login = await client.PostAsJsonAsync("/account/login", new
@@ -283,6 +429,71 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
         return client;
     }
 
+    private async Task<TenantClients> CreateClientsForSameUserInDifferentTenantsAsync()
+    {
+        var email = $"tenant-switcher-{Guid.NewGuid():N}@example.test";
+        const string password = "FeatureLab!123";
+        using var registrationClient = _factory.CreateClient();
+        var registration = await registrationClient.PostAsJsonAsync("/account/register", new
+        {
+            email,
+            password,
+        });
+        registration.EnsureSuccessStatusCode();
+
+        var firstTenantId = Guid.NewGuid();
+        await AssignTenantAsync(email, firstTenantId);
+        await GrantClaimAsync(
+            email,
+            new Claim(
+                WorkItemAuthorization.PermissionClaimType,
+                WorkItemAuthorization.CreatePermission));
+        var firstTenant = await SignInAsync(email, password);
+
+        var secondTenantId = Guid.NewGuid();
+        await AssignTenantAsync(email, secondTenantId);
+        var secondTenant = await SignInAsync(email, password);
+
+        return new TenantClients(
+            firstTenant,
+            secondTenant,
+            secondTenantId);
+    }
+
+    private async Task<HttpClient> SignInAsync(string email, string password)
+    {
+        var client = _factory.CreateClient();
+        var login = await client.PostAsJsonAsync("/account/login", new
+        {
+            email,
+            password,
+        });
+        login.EnsureSuccessStatusCode();
+
+        var tokens = await login.Content.ReadFromJsonAsync<LoginTokenResponse>();
+        Assert.NotNull(tokens);
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", tokens.AccessToken);
+        return client;
+    }
+
+    private async Task AssignTenantAsync(
+        string email,
+        Guid tenantId)
+    {
+        await using var scope = _factory.Services.CreateAsyncScope();
+        var userManager = scope.ServiceProvider.GetRequiredService<UserManager<FeatureLabUser>>();
+        var user = await userManager.FindByEmailAsync(email);
+        Assert.NotNull(user);
+
+        user.TenantId = tenantId;
+        var update = await userManager.UpdateAsync(user);
+
+        Assert.True(
+            update.Succeeded,
+            string.Join("; ", update.Errors.Select(error => error.Description)));
+    }
+
     private static async Task<WorkItemResponse> CreateWorkItemAsync(
         HttpClient client,
         string title)
@@ -297,7 +508,7 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
         return Assert.IsType<WorkItemResponse>(created);
     }
 
-    private async Task GrantCreatePermissionAsync(string email)
+    private async Task GrantClaimAsync(string email, Claim claim)
     {
         await using var scope = _factory.Services.CreateAsyncScope();
         var userManager = scope.ServiceProvider.GetRequiredService<UserManager<FeatureLabUser>>();
@@ -305,16 +516,17 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
 
         Assert.NotNull(user);
 
-        var result = await userManager.AddClaimAsync(
-            user,
-            new Claim(
-                WorkItemAuthorization.PermissionClaimType,
-                WorkItemAuthorization.CreatePermission));
+        var result = await userManager.AddClaimAsync(user, claim);
 
         Assert.True(
             result.Succeeded,
             string.Join("; ", result.Errors.Select(error => error.Description)));
     }
+
+    private sealed record TenantClients(
+        HttpClient FirstTenant,
+        HttpClient SecondTenant,
+        Guid SecondTenantId);
 }
 
 public sealed record LoginTokenResponse(string AccessToken);

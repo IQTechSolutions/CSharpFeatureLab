@@ -6,11 +6,17 @@ public sealed class WorkItem
     {
     }
 
-    private WorkItem(Guid id, string title, string ownerId, DateTime createdAtUtc)
+    private WorkItem(
+        Guid id,
+        string title,
+        string ownerId,
+        Guid tenantId,
+        DateTime createdAtUtc)
     {
         Id = id;
         Title = title;
         OwnerId = ownerId;
+        TenantId = tenantId;
         CreatedAtUtc = createdAtUtc;
         Version = 1;
     }
@@ -23,11 +29,17 @@ public sealed class WorkItem
 
     public string OwnerId { get; private set; } = string.Empty;
 
+    public Guid TenantId { get; private set; }
+
     public DateTime CreatedAtUtc { get; private set; }
 
     public int Version { get; private set; }
 
-    public static WorkItem Create(string title, string ownerId, TimeProvider timeProvider)
+    public static WorkItem Create(
+        string title,
+        string ownerId,
+        Guid tenantId,
+        TimeProvider timeProvider)
     {
         ArgumentNullException.ThrowIfNull(timeProvider);
 
@@ -36,10 +48,18 @@ public sealed class WorkItem
             throw new ArgumentException("An authenticated owner is required.", nameof(ownerId));
         }
 
+        if (tenantId == Guid.Empty)
+        {
+            throw new ArgumentException(
+                "A tenant identifier is required.",
+                nameof(tenantId));
+        }
+
         return new WorkItem(
             Guid.NewGuid(),
             NormalizeTitle(title),
             ownerId,
+            tenantId,
             timeProvider.GetUtcNow().UtcDateTime);
     }
 

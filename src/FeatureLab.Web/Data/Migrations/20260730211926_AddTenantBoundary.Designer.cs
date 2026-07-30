@@ -3,6 +3,7 @@ using System;
 using FeatureLab.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -10,9 +11,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace FeatureLab.Data.Migrations
 {
     [DbContext(typeof(FeatureLabDbContext))]
-    partial class FeatureLabDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260730211926_AddTenantBoundary")]
+    partial class AddTenantBoundary
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.9");
@@ -46,7 +49,7 @@ namespace FeatureLab.Data.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("TenantId", "WorkItemId");
+                    b.HasIndex("WorkItemId");
 
                     b.HasIndex("TenantId", "OwnerId", "RequestedAtUtc");
 
@@ -114,6 +117,8 @@ namespace FeatureLab.Data.Migrations
                         .HasColumnType("INTEGER");
 
                     b.HasKey("Id");
+
+                    b.HasAlternateKey("TenantId", "Id");
 
                     b.HasIndex("CreatedAtUtc");
 
@@ -323,8 +328,7 @@ namespace FeatureLab.Data.Migrations
                 {
                     b.HasOne("FeatureLab.Features.WorkItems.WorkItem", null)
                         .WithMany()
-                        .HasForeignKey("TenantId", "WorkItemId")
-                        .HasPrincipalKey("TenantId", "Id")
+                        .HasForeignKey("WorkItemId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
                 });

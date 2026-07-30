@@ -3,6 +3,7 @@ using FeatureLab.Features.BackgroundJobs;
 using FeatureLab.Features.Chat;
 using FeatureLab.Identity;
 using FeatureLab.Features.WorkItems;
+using FeatureLab.Tenancy;
 using Hangfire;
 using Microsoft.EntityFrameworkCore;
 
@@ -12,9 +13,18 @@ builder.WebHost.UseStaticWebAssets();
 var connectionString = builder.Configuration.GetConnectionString("FeatureLab")
     ?? "Data Source=app.db";
 
+builder.Services.AddScoped<TenantContext>();
+builder.Services.AddScoped<ITenantContext>(
+    services => services.GetRequiredService<TenantContext>());
 builder.Services.AddDbContext<FeatureLabDbContext>(options =>
     options.UseSqlite(connectionString));
 builder.Services.AddAuthorizationBuilder()
+    .AddPolicy(
+        TenantMembership.Policy,
+        policy => policy
+            .RequireAuthenticatedUser()
+            .RequireAssertion(context =>
+                TenantMembership.HasValidTenantId(context.User)))
     .AddPolicy(
         WorkItemAuthorization.CreatePolicy,
         policy => policy
@@ -23,7 +33,8 @@ builder.Services.AddAuthorizationBuilder()
                 WorkItemAuthorization.PermissionClaimType,
                 WorkItemAuthorization.CreatePermission));
 builder.Services.AddIdentityApiEndpoints<FeatureLabUser>()
-    .AddEntityFrameworkStores<FeatureLabDbContext>();
+    .AddEntityFrameworkStores<FeatureLabDbContext>()
+    .AddClaimsPrincipalFactory<FeatureLabUserClaimsPrincipalFactory>();
 builder.Services.AddHangfire(configuration =>
 {
     configuration
@@ -68,11 +79,24 @@ app.UseExceptionHandler();
 app.UseBlazorFrameworkFiles();
 app.UseStaticFiles();
 app.UseAuthentication();
+app.Use(async (context, next) =>
+{
+    if (TenantMembership.TryGetTenantId(
+        context.User,
+        out var tenantId))
+    {
+        context.RequestServices
+            .GetRequiredService<TenantContext>()
+            .Set(tenantId);
+    }
+
+    await next(context);
+});
 app.UseAuthorization();
 app.MapGet("/api/about", () => Results.Ok(new
 {
     application = "C# Feature Lab",
-    lesson = "Move slow work into a reliable background job",
+    lesson = "Your first multi-tenant boundary",
 }));
 app.MapGroup("/account").MapIdentityApi<FeatureLabUser>();
 app.MapWorkItemEndpoints();

@@ -1,4 +1,5 @@
 using FeatureLab.Data;
+using FeatureLab.Tenancy;
 using Microsoft.EntityFrameworkCore;
 
 namespace FeatureLab.Features.BackgroundJobs;
@@ -22,6 +23,7 @@ public interface IWorkItemReportService
 
 public sealed class EfWorkItemReportService(
     FeatureLabDbContext dbContext,
+    ITenantContext tenant,
     TimeProvider timeProvider) : IWorkItemReportService
 {
     public async Task<WorkItemReport?> RequestAsync(
@@ -43,6 +45,7 @@ public sealed class EfWorkItemReportService(
         var report = WorkItemReport.Request(
             workItemId,
             ownerId,
+            tenant.Id,
             timeProvider);
         dbContext.WorkItemReports.Add(report);
         await dbContext.SaveChangesAsync(cancellationToken);

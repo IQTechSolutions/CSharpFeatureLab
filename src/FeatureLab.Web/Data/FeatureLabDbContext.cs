@@ -2,14 +2,19 @@ using FeatureLab.Features.BackgroundJobs;
 using FeatureLab.Features.Chat;
 using FeatureLab.Features.WorkItems;
 using FeatureLab.Identity;
+using FeatureLab.Tenancy;
 using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 
 namespace FeatureLab.Data;
 
-public sealed class FeatureLabDbContext(DbContextOptions<FeatureLabDbContext> options)
+public sealed class FeatureLabDbContext(
+    DbContextOptions<FeatureLabDbContext> options,
+    ITenantContext tenantContext)
     : IdentityDbContext<FeatureLabUser>(options)
 {
+    private Guid CurrentTenantId => tenantContext.Id;
+
     public DbSet<PersistedChatMessage> ChatMessages => Set<PersistedChatMessage>();
 
     public DbSet<WorkItemReport> WorkItemReports => Set<WorkItemReport>();
@@ -19,6 +24,12 @@ public sealed class FeatureLabDbContext(DbContextOptions<FeatureLabDbContext> op
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
+
+        var user = modelBuilder.Entity<FeatureLabUser>();
+
+        user.Property(member => member.TenantId)
+            .IsRequired();
+        user.HasIndex(member => member.TenantId);
 
         var chatMessage = modelBuilder.Entity<PersistedChatMessage>();
 
@@ -53,11 +64,25 @@ public sealed class FeatureLabDbContext(DbContextOptions<FeatureLabDbContext> op
         workItem.Property(item => item.OwnerId)
             .HasMaxLength(450)
             .IsRequired();
+        workItem.Property(item => item.TenantId)
+            .IsRequired();
         workItem.Property(item => item.Version)
             .IsConcurrencyToken()
             .IsRequired();
-        workItem.HasIndex(item => new { item.OwnerId, item.CreatedAtUtc });
+        workItem.HasQueryFilter(item =>
+            item.TenantId == CurrentTenantId);
+        workItem.HasIndex(item => new
+        {
+            item.TenantId,
+            item.OwnerId,
+            item.CreatedAtUtc,
+        });
         workItem.HasIndex(item => item.CreatedAtUtc);
+        workItem.HasAlternateKey(item => new
+        {
+            item.TenantId,
+            item.Id,
+        });
 
         var workItemReport = modelBuilder.Entity<WorkItemReport>();
 
@@ -66,18 +91,32 @@ public sealed class FeatureLabDbContext(DbContextOptions<FeatureLabDbContext> op
         workItemReport.Property(report => report.OwnerId)
             .HasMaxLength(450)
             .IsRequired();
+        workItemReport.Property(report => report.TenantId)
+            .IsRequired();
         workItemReport.Property(report => report.RequestedAtUtc)
             .IsRequired();
         workItemReport.Property(report => report.Content)
             .HasMaxLength(500);
+        workItemReport.HasQueryFilter(report =>
+            report.TenantId == CurrentTenantId);
         workItemReport.HasIndex(report => new
         {
+            report.TenantId,
             report.OwnerId,
             report.RequestedAtUtc,
         });
         workItemReport.HasOne<WorkItem>()
             .WithMany()
-            .HasForeignKey(report => report.WorkItemId)
+            .HasForeignKey(report => new
+            {
+                report.TenantId,
+                report.WorkItemId,
+            })
+            .HasPrincipalKey(item => new
+            {
+                item.TenantId,
+                item.Id,
+            })
             .OnDelete(DeleteBehavior.Cascade);
     }
 }

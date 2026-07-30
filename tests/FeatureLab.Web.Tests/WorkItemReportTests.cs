@@ -7,6 +7,7 @@ using System.Security.Claims;
 using FeatureLab.Features.BackgroundJobs;
 using FeatureLab.Features.WorkItems;
 using FeatureLab.Identity;
+using FeatureLab.Tenancy;
 using Hangfire;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.Extensions.DependencyInjection;
@@ -46,7 +47,7 @@ public sealed class WorkItemReportTests : IClassFixture<FeatureLabWebFactory>
             _factory.Services.GetRequiredService<RecordingWorkItemReportScheduler>();
         Assert.Equal(
             accepted.JobId,
-            scheduler.EnqueuedReports[accepted.Report.Id]);
+            scheduler.EnqueuedReports[accepted.Report.Id].JobId);
 
         var pending = await client.GetFromJsonAsync<WorkItemReportResponse>(
             $"/api/work-items/reports/{accepted.Report.Id}");
@@ -99,10 +100,15 @@ public sealed class WorkItemReportTests : IClassFixture<FeatureLabWebFactory>
     public async Task Job_exposes_failures_for_three_bounded_retries()
     {
         var expected = new InvalidOperationException("Synthetic transient failure.");
-        var job = new WorkItemReportJob(new FailingWorkItemReportService(expected));
+        var job = new WorkItemReportJob(
+            new TenantContext(),
+            new FailingWorkItemReportService(expected));
 
         var actual = await Assert.ThrowsAsync<InvalidOperationException>(
-            () => job.RunAsync(Guid.NewGuid(), CancellationToken.None));
+            () => job.RunAsync(
+                Guid.NewGuid(),
+                Guid.NewGuid(),
+                CancellationToken.None));
         Assert.Same(expected, actual);
 
         var retry = typeof(WorkItemReportJob)
@@ -114,11 +120,46 @@ public sealed class WorkItemReportTests : IClassFixture<FeatureLabWebFactory>
         Assert.Equal(AttemptsExceededAction.Fail, retry.OnAttemptsExceeded);
     }
 
+    [Fact]
+    public async Task Job_rejects_a_report_from_another_tenant()
+    {
+        using var client = await CreateAuthenticatedClientAsync(canCreateWorkItems: true);
+        var workItem = await CreateWorkItemAsync(client, "Tenant-scoped report");
+        var request = await client.PostAsync(
+            $"/api/work-items/{workItem.Id}/reports",
+            content: null);
+        request.EnsureSuccessStatusCode();
+        var accepted =
+            await request.Content.ReadFromJsonAsync<WorkItemReportAcceptedResponse>();
+        Assert.NotNull(accepted);
+
+        await using (var scope = _factory.Services.CreateAsyncScope())
+        {
+            var job = scope.ServiceProvider.GetRequiredService<WorkItemReportJob>();
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => job.RunAsync(
+                    Guid.NewGuid(),
+                    accepted.Report.Id,
+                    CancellationToken.None));
+        }
+
+        var report = await client.GetFromJsonAsync<WorkItemReportResponse>(
+            $"/api/work-items/reports/{accepted.Report.Id}");
+        Assert.NotNull(report);
+        Assert.Equal("Pending", report.Status);
+    }
+
     private async Task RunReportJobAsync(Guid reportId)
     {
         await using var scope = _factory.Services.CreateAsyncScope();
         var job = scope.ServiceProvider.GetRequiredService<WorkItemReportJob>();
-        await job.RunAsync(reportId, CancellationToken.None);
+        var scheduler =
+            _factory.Services.GetRequiredService<RecordingWorkItemReportScheduler>();
+        var scheduledReport = scheduler.EnqueuedReports[reportId];
+        await job.RunAsync(
+            scheduledReport.TenantId,
+            reportId,
+            CancellationToken.None);
     }
 
     private async Task<HttpClient> CreateAuthenticatedClientAsync(
@@ -137,7 +178,11 @@ public sealed class WorkItemReportTests : IClassFixture<FeatureLabWebFactory>
 
         if (canCreateWorkItems)
         {
-            await GrantCreatePermissionAsync(email);
+            await GrantClaimAsync(
+                email,
+                new Claim(
+                    WorkItemAuthorization.PermissionClaimType,
+                    WorkItemAuthorization.CreatePermission));
         }
 
         var login = await client.PostAsJsonAsync("/account/login", new
@@ -168,7 +213,7 @@ public sealed class WorkItemReportTests : IClassFixture<FeatureLabWebFactory>
         return Assert.IsType<WorkItemResponse>(created);
     }
 
-    private async Task GrantCreatePermissionAsync(string email)
+    private async Task GrantClaimAsync(string email, Claim claim)
     {
         await using var scope = _factory.Services.CreateAsyncScope();
         var userManager =
@@ -176,11 +221,7 @@ public sealed class WorkItemReportTests : IClassFixture<FeatureLabWebFactory>
         var user = await userManager.FindByEmailAsync(email);
         Assert.NotNull(user);
 
-        var result = await userManager.AddClaimAsync(
-            user,
-            new Claim(
-                WorkItemAuthorization.PermissionClaimType,
-                WorkItemAuthorization.CreatePermission));
+        var result = await userManager.AddClaimAsync(user, claim);
 
         Assert.True(
             result.Succeeded,
@@ -211,12 +252,19 @@ public sealed class WorkItemReportTests : IClassFixture<FeatureLabWebFactory>
 
 public sealed class RecordingWorkItemReportScheduler : IWorkItemReportScheduler
 {
-    public ConcurrentDictionary<Guid, string> EnqueuedReports { get; } = new();
+    public ConcurrentDictionary<Guid, ScheduledReport> EnqueuedReports { get; } = new();
 
-    public string Enqueue(Guid reportId)
+    public string Enqueue(Guid tenantId, Guid reportId)
     {
         var jobId = $"test-{reportId:N}";
-        Assert.True(EnqueuedReports.TryAdd(reportId, jobId));
+        Assert.True(
+            EnqueuedReports.TryAdd(
+                reportId,
+                new ScheduledReport(jobId, tenantId)));
         return jobId;
     }
+
+    public sealed record ScheduledReport(
+        string JobId,
+        Guid TenantId);
 }

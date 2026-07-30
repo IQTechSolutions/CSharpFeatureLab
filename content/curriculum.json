@@ -99,7 +99,8 @@
       "slug": "multitenant-boundary",
       "title": "Your First Multi-tenant Boundary",
       "playlist": "Multi-tenancy",
-      "status": "planned"
+      "checkpoint": "episode/10-multitenant-boundary",
+      "status": "release"
     }
   ]
 }

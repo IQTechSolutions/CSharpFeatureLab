@@ -10,11 +10,13 @@ public sealed class WorkItemReport
         Guid id,
         Guid workItemId,
         string ownerId,
+        Guid tenantId,
         DateTime requestedAtUtc)
     {
         Id = id;
         WorkItemId = workItemId;
         OwnerId = ownerId;
+        TenantId = tenantId;
         RequestedAtUtc = requestedAtUtc;
     }
 
@@ -23,6 +25,8 @@ public sealed class WorkItemReport
     public Guid WorkItemId { get; private set; }
 
     public string OwnerId { get; private set; } = string.Empty;
+
+    public Guid TenantId { get; private set; }
 
     public DateTime RequestedAtUtc { get; private set; }
 
@@ -33,6 +37,7 @@ public sealed class WorkItemReport
     public static WorkItemReport Request(
         Guid workItemId,
         string ownerId,
+        Guid tenantId,
         TimeProvider timeProvider)
     {
         ArgumentNullException.ThrowIfNull(timeProvider);
@@ -51,10 +56,18 @@ public sealed class WorkItemReport
                 nameof(ownerId));
         }
 
+        if (tenantId == Guid.Empty)
+        {
+            throw new ArgumentException(
+                "A tenant identifier is required.",
+                nameof(tenantId));
+        }
+
         return new WorkItemReport(
             Guid.NewGuid(),
             workItemId,
             ownerId,
+            tenantId,
             timeProvider.GetUtcNow().UtcDateTime);
     }
 

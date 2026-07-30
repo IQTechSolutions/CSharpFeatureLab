@@ -2,5 +2,7 @@ using Microsoft.AspNetCore.Identity;
 
 namespace FeatureLab.Identity;
 
-public sealed class FeatureLabUser : IdentityUser;
-
+public sealed class FeatureLabUser : IdentityUser
+{
+    public Guid TenantId { get; set; } = Guid.NewGuid();
+}
