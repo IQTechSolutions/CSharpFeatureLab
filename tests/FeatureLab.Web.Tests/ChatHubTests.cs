@@ -273,7 +273,7 @@ public sealed class ChatHubTests : IClassFixture<FeatureLabWebFactory>
             await AssignTenantAsync(email, assignedTenantId);
         }
 
-        var accessToken = await SignInAsync(email, password);
+        var bearerValue = await SignInAsync(email, password);
 
         await using var scope = _factory.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider
@@ -288,7 +288,7 @@ public sealed class ChatHubTests : IClassFixture<FeatureLabWebFactory>
             .SingleAsync();
 
         return new RegisteredMember(
-            accessToken,
+            bearerValue,
             user.Id,
             user.TenantId);
     }
