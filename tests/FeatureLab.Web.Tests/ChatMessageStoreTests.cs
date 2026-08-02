@@ -1,4 +1,5 @@
 using FeatureLab.Features.Chat;
+using FeatureLab.Tenancy;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace FeatureLab.Web.Tests;
@@ -17,6 +18,9 @@ public sealed class ChatMessageStoreTests : IClassFixture<FeatureLabWebFactory>
     {
         using var client = _factory.CreateClient();
         await using var scope = _factory.Services.CreateAsyncScope();
+        var tenant = scope.ServiceProvider
+            .GetRequiredService<TenantContext>();
+        tenant.Set(Guid.NewGuid());
         var store = scope.ServiceProvider
             .GetRequiredService<IChatMessageStore>();
         var start = new DateTimeOffset(
@@ -51,5 +55,29 @@ public sealed class ChatMessageStoreTests : IClassFixture<FeatureLabWebFactory>
             history
                 .Zip(history.Skip(1))
                 .All(pair => pair.First.SentAtUtc < pair.Second.SentAtUtc));
+    }
+
+    [Fact]
+    public async Task Store_fails_closed_without_an_established_tenant()
+    {
+        using var client = _factory.CreateClient();
+        await using var scope = _factory.Services.CreateAsyncScope();
+        var store = scope.ServiceProvider
+            .GetRequiredService<IChatMessageStore>();
+        var message = new ChatMessage(
+            Guid.NewGuid(),
+            "Member",
+            "No tenant means no chat",
+            DateTimeOffset.UtcNow);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => store.AddAsync(
+                message,
+                "synthetic-member-id",
+                CancellationToken.None));
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => store.ListRecentAsync(
+                ChatHub.HistoryLimit,
+                CancellationToken.None));
     }
 }

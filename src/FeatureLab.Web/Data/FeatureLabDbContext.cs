@@ -38,6 +38,8 @@ public sealed class FeatureLabDbContext(
         chatMessage.Property(message => message.AuthorId)
             .HasMaxLength(450)
             .IsRequired();
+        chatMessage.Property(message => message.TenantId)
+            .IsRequired();
         chatMessage.Property(message => message.Sender)
             .HasMaxLength(80)
             .IsRequired();
@@ -46,8 +48,11 @@ public sealed class FeatureLabDbContext(
             .IsRequired();
         chatMessage.Property(message => message.SentAtUtc)
             .IsRequired();
+        chatMessage.HasQueryFilter(message =>
+            message.TenantId == CurrentTenantId);
         chatMessage.HasIndex(message => new
         {
+            message.TenantId,
             message.SentAtUtc,
             message.Id,
         });

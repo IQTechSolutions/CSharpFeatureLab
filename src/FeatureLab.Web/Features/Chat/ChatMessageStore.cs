@@ -1,4 +1,5 @@
 using FeatureLab.Data;
+using FeatureLab.Tenancy;
 using Microsoft.EntityFrameworkCore;
 
 namespace FeatureLab.Features.Chat;
@@ -15,7 +16,9 @@ public interface IChatMessageStore
         CancellationToken cancellationToken);
 }
 
-public sealed class EfChatMessageStore(FeatureLabDbContext dbContext)
+public sealed class EfChatMessageStore(
+    FeatureLabDbContext dbContext,
+    ITenantContext tenantContext)
     : IChatMessageStore
 {
     public async Task AddAsync(
@@ -24,7 +27,10 @@ public sealed class EfChatMessageStore(FeatureLabDbContext dbContext)
         CancellationToken cancellationToken)
     {
         dbContext.ChatMessages.Add(
-            new PersistedChatMessage(message, authorId));
+            new PersistedChatMessage(
+                message,
+                authorId,
+                tenantContext.Id));
         await dbContext.SaveChangesAsync(cancellationToken);
     }
 

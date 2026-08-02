@@ -8,13 +8,21 @@ public sealed class PersistedChatMessage
 
     public PersistedChatMessage(
         ChatMessage message,
-        string authorId)
+        string authorId,
+        Guid tenantId)
     {
         ArgumentNullException.ThrowIfNull(message);
         ArgumentException.ThrowIfNullOrWhiteSpace(authorId);
+        if (tenantId == Guid.Empty)
+        {
+            throw new ArgumentException(
+                "A non-empty tenant identifier is required.",
+                nameof(tenantId));
+        }
 
         Id = message.Id;
         AuthorId = authorId;
+        TenantId = tenantId;
         Sender = message.Sender;
         Text = message.Text;
         SentAtUtc = message.SentAtUtc.UtcDateTime;
@@ -23,6 +31,8 @@ public sealed class PersistedChatMessage
     public Guid Id { get; private set; }
 
     public string AuthorId { get; private set; } = string.Empty;
+
+    public Guid TenantId { get; private set; }
 
     public string Sender { get; private set; } = string.Empty;
 

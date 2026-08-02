@@ -1,20 +1,33 @@
+using FeatureLab.Tenancy;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.SignalR;
 
 namespace FeatureLab.Features.Chat;
 
-[Authorize]
+[Authorize(Policy = TenantMembership.Policy)]
 public sealed class ChatHub(
     TimeProvider timeProvider,
-    IChatMessageStore messageStore) : Hub
+    IChatMessageStore messageStore,
+    TenantContext tenantContext) : Hub
 {
     public const string Route = "/hubs/chat";
     public const string MessageReceived = "MessageReceived";
     public const int MaximumMessageLength = 240;
     public const int HistoryLimit = 50;
 
+    public override async Task OnConnectedAsync()
+    {
+        var tenantId = EstablishTenant();
+        await Groups.AddToGroupAsync(
+            Context.ConnectionId,
+            GroupName(tenantId),
+            Context.ConnectionAborted);
+        await base.OnConnectedAsync();
+    }
+
     public async Task SendMessage(string text)
     {
+        var tenantId = EstablishTenant();
         var normalizedText = text?.Trim() ?? string.Empty;
 
         if (normalizedText.Length is < 1 or > MaximumMessageLength)
@@ -39,16 +52,37 @@ public sealed class ChatHub(
             message,
             authorId,
             Context.ConnectionAborted);
-        await Clients.All.SendAsync(
+        await Clients.Group(GroupName(tenantId)).SendAsync(
             MessageReceived,
             message,
             Context.ConnectionAborted);
     }
 
-    public Task<IReadOnlyList<ChatMessage>> GetRecentMessages() =>
-        messageStore.ListRecentAsync(
+    public Task<IReadOnlyList<ChatMessage>> GetRecentMessages()
+    {
+        EstablishTenant();
+        return messageStore.ListRecentAsync(
             HistoryLimit,
             Context.ConnectionAborted);
+    }
+
+    private Guid EstablishTenant()
+    {
+        if (Context.User is not { } principal
+            || !TenantMembership.TryGetTenantId(
+                principal,
+                out var tenantId))
+        {
+            throw new HubException(
+                "Unable to establish the chat tenant.");
+        }
+
+        tenantContext.Set(tenantId);
+        return tenantId;
+    }
+
+    private static string GroupName(Guid tenantId) =>
+        $"tenant:{tenantId:N}";
 }
 
 public sealed record ChatMessage(

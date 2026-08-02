@@ -29,10 +29,113 @@ public sealed class MigrationTests
             Assert.Contains(
                 appliedMigrations,
                 migration => migration.EndsWith(
-                    "_EnforceTenantReportBoundary",
+                    "_ScopeChatToTenant",
                     StringComparison.Ordinal));
             Assert.Empty(await dbContext.Database.GetPendingMigrationsAsync());
             await AssertForeignKeysAreValidAsync(dbContext);
+        }
+        finally
+        {
+            if (File.Exists(databasePath))
+            {
+                File.Delete(databasePath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Migration_backfills_legacy_chat_into_the_authors_workspace()
+    {
+        var databasePath = Path.Combine(
+            Path.GetTempPath(),
+            $"feature-lab-chat-migrations-{Guid.NewGuid():N}.db");
+
+        try
+        {
+            var tenant = new TenantContext();
+            var tenantId = Guid.NewGuid();
+            tenant.Set(tenantId);
+            var options = new DbContextOptionsBuilder<FeatureLabDbContext>()
+                .UseSqlite($"Data Source={databasePath};Pooling=False")
+                .Options;
+            await using var dbContext =
+                new FeatureLabDbContext(options, tenant);
+            await dbContext.Database.MigrateAsync(
+                "20260730212319_EnforceTenantReportBoundary");
+
+            var userId = $"legacy-chat-user-{Guid.NewGuid():N}";
+            var email = $"legacy-chat-{Guid.NewGuid():N}@example.test";
+            await dbContext.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                INSERT INTO "AspNetUsers"
+                    ("Id", "UserName", "NormalizedUserName", "Email", "NormalizedEmail",
+                     "EmailConfirmed", "PhoneNumberConfirmed", "TwoFactorEnabled",
+                     "LockoutEnabled", "AccessFailedCount", "TenantId")
+                VALUES
+                    ({userId}, {email}, {email.ToUpperInvariant()}, {email},
+                     {email.ToUpperInvariant()}, {false}, {false}, {false}, {true}, {0},
+                     {tenantId})
+                """);
+
+            var messageId = Guid.NewGuid();
+            await dbContext.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                INSERT INTO "ChatMessages"
+                    ("Id", "AuthorId", "Sender", "Text", "SentAtUtc")
+                VALUES
+                    ({messageId}, {userId}, {"Member"}, {"Legacy tenant chat"},
+                     {DateTime.UtcNow})
+                """);
+
+            await dbContext.Database.MigrateAsync();
+
+            var migrated = await dbContext.ChatMessages
+                .IgnoreQueryFilters()
+                .SingleAsync(message => message.Id == messageId);
+            Assert.Equal(tenantId, migrated.TenantId);
+            Assert.Empty(await dbContext.Database.GetPendingMigrationsAsync());
+        }
+        finally
+        {
+            if (File.Exists(databasePath))
+            {
+                File.Delete(databasePath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Migration_fails_when_a_legacy_chat_author_cannot_be_mapped()
+    {
+        var databasePath = Path.Combine(
+            Path.GetTempPath(),
+            $"feature-lab-orphan-chat-{Guid.NewGuid():N}.db");
+
+        try
+        {
+            var options = new DbContextOptionsBuilder<FeatureLabDbContext>()
+                .UseSqlite($"Data Source={databasePath};Pooling=False")
+                .Options;
+            await using var dbContext =
+                new FeatureLabDbContext(options, new TenantContext());
+            await dbContext.Database.MigrateAsync(
+                "20260730212319_EnforceTenantReportBoundary");
+            await dbContext.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                INSERT INTO "ChatMessages"
+                    ("Id", "AuthorId", "Sender", "Text", "SentAtUtc")
+                VALUES
+                    ({Guid.NewGuid()}, {"missing-chat-author"}, {"Member"},
+                     {"Unmapped chat"}, {DateTime.UtcNow})
+                """);
+
+            var error = await Assert.ThrowsAsync<SqliteException>(
+                () => dbContext.Database.MigrateAsync());
+
+            Assert.Contains(
+                "CHECK constraint failed",
+                error.Message,
+                StringComparison.Ordinal);
         }
         finally
         {
