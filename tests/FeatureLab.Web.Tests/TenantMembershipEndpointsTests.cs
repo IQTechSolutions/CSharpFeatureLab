@@ -12,8 +12,6 @@ public sealed class TenantMembershipEndpointsTests(
     FeatureLabWebFactory factory)
     : IClassFixture<FeatureLabWebFactory>
 {
-    private const string MemberPassword = "FeatureLab!123";
-
     [Fact]
     public async Task Removing_membership_blocks_the_existing_access_token()
     {
@@ -69,18 +67,19 @@ public sealed class TenantMembershipEndpointsTests(
     {
         var client = factory.CreateClient();
         var email = $"departing-member-{Guid.NewGuid():N}@example.test";
+        const string password = "FeatureLab!123";
 
         var registration = await client.PostAsJsonAsync("/account/register", new
         {
             email,
-            password = MemberPassword,
+            password,
         });
         registration.EnsureSuccessStatusCode();
 
         var login = await client.PostAsJsonAsync("/account/login", new
         {
             email,
-            password = MemberPassword,
+            password,
         });
         login.EnsureSuccessStatusCode();
 
@@ -107,10 +106,11 @@ public sealed class TenantMembershipEndpointsTests(
         string email)
     {
         var client = factory.CreateClient();
+        const string password = "FeatureLab!123";
         var login = await client.PostAsJsonAsync("/account/login", new
         {
             email,
-            password = MemberPassword,
+            password,
         });
         login.EnsureSuccessStatusCode();
         var tokens = await login.Content
