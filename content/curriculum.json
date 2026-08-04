@@ -109,6 +109,14 @@
       "playlist": "Multi-tenancy",
       "checkpoint": "episode/11-tenant-isolated-signalr-chat",
       "status": "release"
+    },
+    {
+      "number": 12,
+      "slug": "tenant-membership-revocation",
+      "title": "Revoke Tenant Access Before a Stale Token Expires",
+      "playlist": "Multi-tenancy",
+      "checkpoint": "episode/12-tenant-membership-revocation",
+      "status": "release"
     }
   ]
 }

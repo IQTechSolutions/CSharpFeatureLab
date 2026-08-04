@@ -187,9 +187,9 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
     }
 
     [Fact]
-    public async Task List_hides_the_same_users_work_items_from_another_tenant()
+    public async Task List_hides_work_items_from_another_tenant()
     {
-        var clients = await CreateClientsForSameUserInDifferentTenantsAsync();
+        var clients = await CreateClientsInDifferentTenantsAsync();
         using var firstTenant = clients.FirstTenant;
         using var secondTenant = clients.SecondTenant;
         var title = $"Tenant A item {Guid.NewGuid():N}";
@@ -284,9 +284,9 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
     }
 
     [Fact]
-    public async Task Update_hides_the_same_users_work_item_from_another_tenant()
+    public async Task Update_hides_a_work_item_from_another_tenant()
     {
-        var clients = await CreateClientsForSameUserInDifferentTenantsAsync();
+        var clients = await CreateClientsInDifferentTenantsAsync();
         using var firstTenant = clients.FirstTenant;
         using var secondTenant = clients.SecondTenant;
         var created = await CreateWorkItemAsync(
@@ -305,9 +305,9 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
     }
 
     [Fact]
-    public async Task Reports_hide_the_same_users_resources_from_another_tenant()
+    public async Task Reports_hide_resources_from_another_tenant()
     {
-        var clients = await CreateClientsForSameUserInDifferentTenantsAsync();
+        var clients = await CreateClientsInDifferentTenantsAsync();
         using var firstTenant = clients.FirstTenant;
         using var secondTenant = clients.SecondTenant;
         var created = await CreateWorkItemAsync(
@@ -429,30 +429,37 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
         return client;
     }
 
-    private async Task<TenantClients> CreateClientsForSameUserInDifferentTenantsAsync()
+    private async Task<TenantClients> CreateClientsInDifferentTenantsAsync()
     {
-        var email = $"tenant-switcher-{Guid.NewGuid():N}@example.test";
+        var firstEmail = $"tenant-a-{Guid.NewGuid():N}@example.test";
+        var secondEmail = $"tenant-b-{Guid.NewGuid():N}@example.test";
         const string password = "FeatureLab!123";
         using var registrationClient = _factory.CreateClient();
-        var registration = await registrationClient.PostAsJsonAsync("/account/register", new
+        var firstRegistration = await registrationClient.PostAsJsonAsync("/account/register", new
         {
-            email,
+            email = firstEmail,
             password,
         });
-        registration.EnsureSuccessStatusCode();
+        firstRegistration.EnsureSuccessStatusCode();
+        var secondRegistration = await registrationClient.PostAsJsonAsync("/account/register", new
+        {
+            email = secondEmail,
+            password,
+        });
+        secondRegistration.EnsureSuccessStatusCode();
 
         var firstTenantId = Guid.NewGuid();
-        await AssignTenantAsync(email, firstTenantId);
+        await AssignTenantAsync(firstEmail, firstTenantId);
         await GrantClaimAsync(
-            email,
+            firstEmail,
             new Claim(
                 WorkItemAuthorization.PermissionClaimType,
                 WorkItemAuthorization.CreatePermission));
-        var firstTenant = await SignInAsync(email, password);
+        var firstTenant = await SignInAsync(firstEmail, password);
 
         var secondTenantId = Guid.NewGuid();
-        await AssignTenantAsync(email, secondTenantId);
-        var secondTenant = await SignInAsync(email, password);
+        await AssignTenantAsync(secondEmail, secondTenantId);
+        var secondTenant = await SignInAsync(secondEmail, password);
 
         return new TenantClients(
             firstTenant,

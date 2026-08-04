@@ -50,6 +50,23 @@ public sealed class ChatHubTests : IClassFixture<FeatureLabWebFactory>
     }
 
     [Fact]
+    public async Task Removed_member_cannot_negotiate_chat_with_a_stale_token()
+    {
+        var member = await RegisterMemberAsync();
+        using var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", member.AccessToken);
+        var removal = await client.DeleteAsync("/api/tenant-membership");
+        Assert.Equal(HttpStatusCode.NoContent, removal.StatusCode);
+
+        var response = await client.PostAsync(
+            $"{ChatHub.Route}/negotiate?negotiateVersion=1",
+            content: null);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
     public async Task SendMessage_broadcasts_server_authored_message_inside_the_tenant()
     {
         var tenantId = Guid.NewGuid();
@@ -78,9 +95,30 @@ public sealed class ChatHubTests : IClassFixture<FeatureLabWebFactory>
     }
 
     [Fact]
-    public async Task SendMessage_does_not_broadcast_to_another_tenant_for_the_same_user()
+    public async Task Removed_member_cannot_send_on_an_existing_connection()
     {
-        var members = await RegisterSameUserInDifferentTenantsAsync();
+        var member = await RegisterMemberAsync();
+        await using var connection = CreateConnection(member.AccessToken);
+        await connection.StartAsync();
+
+        using var client = _factory.CreateClient();
+        client.DefaultRequestHeaders.Authorization =
+            new AuthenticationHeaderValue("Bearer", member.AccessToken);
+        var removal = await client.DeleteAsync("/api/tenant-membership");
+        Assert.Equal(HttpStatusCode.NoContent, removal.StatusCode);
+
+        var error = await Assert.ThrowsAsync<HttpRequestException>(
+            () => connection.InvokeAsync(
+                "SendMessage",
+                "This connection is no longer a member"));
+
+        Assert.Equal(HttpStatusCode.Forbidden, error.StatusCode);
+    }
+
+    [Fact]
+    public async Task SendMessage_does_not_broadcast_to_another_tenant()
+    {
+        var members = await RegisterMembersInDifferentTenantsAsync();
         await using var firstTenant = CreateConnection(
             members.FirstTenant.AccessToken);
         await using var secondTenant = CreateConnection(
@@ -104,7 +142,7 @@ public sealed class ChatHubTests : IClassFixture<FeatureLabWebFactory>
     [Fact]
     public async Task Reconnected_member_rejoins_only_its_tenant_group()
     {
-        var members = await RegisterSameUserInDifferentTenantsAsync();
+        var members = await RegisterMembersInDifferentTenantsAsync();
         await using var firstTenant = CreateConnection(
             members.FirstTenant.AccessToken);
         await using var secondTenant = CreateConnection(
@@ -187,9 +225,9 @@ public sealed class ChatHubTests : IClassFixture<FeatureLabWebFactory>
     }
 
     [Fact]
-    public async Task RecentMessages_hides_another_tenants_history_from_the_same_user()
+    public async Task RecentMessages_hides_another_tenants_history()
     {
-        var members = await RegisterSameUserInDifferentTenantsAsync();
+        var members = await RegisterMembersInDifferentTenantsAsync();
         await using var firstTenant = CreateConnection(
             members.FirstTenant.AccessToken);
         await using var secondTenant = CreateConnection(
@@ -293,37 +331,14 @@ public sealed class ChatHubTests : IClassFixture<FeatureLabWebFactory>
             user.TenantId);
     }
 
-    private async Task<TenantMembers> RegisterSameUserInDifferentTenantsAsync()
+    private async Task<TenantMembers> RegisterMembersInDifferentTenantsAsync()
     {
-        using var client = _factory.CreateClient();
-        var email = $"chat-switcher-{Guid.NewGuid():N}@example.test";
-        const string password = "FeatureLab!123";
-        var registration = await client.PostAsJsonAsync("/account/register", new
-        {
-            email,
-            password,
-        });
-        registration.EnsureSuccessStatusCode();
-
         var firstTenantId = Guid.NewGuid();
-        await AssignTenantAsync(email, firstTenantId);
-        var firstToken = await SignInAsync(email, password);
-
         var secondTenantId = Guid.NewGuid();
-        await AssignTenantAsync(email, secondTenantId);
-        var secondToken = await SignInAsync(email, password);
-
-        await using var scope = _factory.Services.CreateAsyncScope();
-        var dbContext = scope.ServiceProvider
-            .GetRequiredService<FeatureLabDbContext>();
-        var userId = await dbContext.Users
-            .Where(user => user.Email == email)
-            .Select(user => user.Id)
-            .SingleAsync();
 
         return new TenantMembers(
-            new RegisteredMember(firstToken, userId, firstTenantId),
-            new RegisteredMember(secondToken, userId, secondTenantId));
+            await RegisterMemberAsync(firstTenantId),
+            await RegisterMemberAsync(secondTenantId));
     }
 
     private async Task AssignTenantAsync(string email, Guid tenantId)

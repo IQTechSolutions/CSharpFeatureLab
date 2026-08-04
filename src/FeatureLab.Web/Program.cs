@@ -5,6 +5,7 @@ using FeatureLab.Identity;
 using FeatureLab.Features.WorkItems;
 using FeatureLab.Tenancy;
 using Hangfire;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -23,8 +24,8 @@ builder.Services.AddAuthorizationBuilder()
         TenantMembership.Policy,
         policy => policy
             .RequireAuthenticatedUser()
-            .RequireAssertion(context =>
-                TenantMembership.HasValidTenantId(context.User)))
+            .AddRequirements(
+                ActiveTenantMembershipRequirement.Instance))
     .AddPolicy(
         WorkItemAuthorization.CreatePolicy,
         policy => policy
@@ -61,6 +62,8 @@ if (!builder.Environment.IsEnvironment("Testing"))
     builder.Services.AddHangfireServer();
 }
 builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddScoped<ITenantMembershipStore, EfTenantMembershipStore>();
+builder.Services.AddScoped<IAuthorizationHandler, ActiveTenantMembershipHandler>();
 builder.Services.AddScoped<IWorkItemReportService, EfWorkItemReportService>();
 builder.Services.AddScoped<WorkItemReportJob>();
 builder.Services.AddSingleton<IWorkItemReportScheduler, HangfireWorkItemReportScheduler>();
@@ -96,9 +99,10 @@ app.UseAuthorization();
 app.MapGet("/api/about", () => Results.Ok(new
 {
     application = "C# Feature Lab",
-    lesson = "Tenant-scoped SignalR chat",
+    lesson = "Live tenant membership revocation",
 }));
 app.MapGroup("/account").MapIdentityApi<FeatureLabUser>();
+app.MapTenantMembershipEndpoints();
 app.MapWorkItemEndpoints();
 app.MapHub<ChatHub>(ChatHub.Route);
 app.MapFallbackToFile("index.html");
