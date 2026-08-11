@@ -29,10 +29,135 @@ public sealed class MigrationTests
             Assert.Contains(
                 appliedMigrations,
                 migration => migration.EndsWith(
-                    "_ScopeChatToTenant",
+                    "_AddVersionedMembershipInvitations",
                     StringComparison.Ordinal));
             Assert.Empty(await dbContext.Database.GetPendingMigrationsAsync());
             await AssertForeignKeysAreValidAsync(dbContext);
+        }
+        finally
+        {
+            if (File.Exists(databasePath))
+            {
+                File.Delete(databasePath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Migration_backfills_only_current_tenant_memberships()
+    {
+        var databasePath = Path.Combine(
+            Path.GetTempPath(),
+            $"feature-lab-membership-migrations-{Guid.NewGuid():N}.db");
+
+        try
+        {
+            var options = new DbContextOptionsBuilder<FeatureLabDbContext>()
+                .UseSqlite($"Data Source={databasePath};Pooling=False")
+                .Options;
+            await using var dbContext =
+                new FeatureLabDbContext(options, new TenantContext());
+            await dbContext.Database.MigrateAsync(
+                "20260802100143_ScopeChatToTenant");
+
+            var activeUserId = $"active-member-{Guid.NewGuid():N}";
+            var removedUserId = $"removed-member-{Guid.NewGuid():N}";
+            var activeEmail = $"active-{Guid.NewGuid():N}@example.test";
+            var removedEmail = $"removed-{Guid.NewGuid():N}@example.test";
+            var activeNormalizedEmail = activeEmail.ToUpperInvariant();
+            var removedNormalizedEmail = removedEmail.ToUpperInvariant();
+            var tenantId = Guid.NewGuid();
+            await dbContext.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                INSERT INTO "AspNetUsers"
+                    ("Id", "UserName", "NormalizedUserName", "Email", "NormalizedEmail",
+                     "EmailConfirmed", "PhoneNumberConfirmed", "TwoFactorEnabled",
+                     "LockoutEnabled", "AccessFailedCount", "TenantId")
+                VALUES
+                    ({activeUserId}, {activeEmail}, {activeNormalizedEmail},
+                     {activeEmail}, {activeNormalizedEmail}, {false}, {false},
+                     {false}, {true}, {0}, {tenantId}),
+                    ({removedUserId}, {removedEmail}, {removedNormalizedEmail},
+                     {removedEmail}, {removedNormalizedEmail}, {false}, {false},
+                     {false}, {true}, {0}, {Guid.Empty})
+                """);
+
+            await dbContext.Database.MigrateAsync();
+
+            var migratedUsers = await dbContext.Users
+                .Where(user => user.Id == activeUserId
+                    || user.Id == removedUserId)
+                .ToDictionaryAsync(user => user.Id);
+            Assert.Equal(tenantId, migratedUsers[activeUserId].TenantId);
+            Assert.Equal(Guid.Empty, migratedUsers[removedUserId].TenantId);
+
+            var membership = await dbContext.TenantMemberships.SingleAsync();
+            Assert.Equal(activeUserId, membership.UserId);
+            Assert.Equal(tenantId, membership.TenantId);
+            Assert.Equal(1, membership.Version);
+            Assert.True(membership.IsActive);
+            Assert.NotEqual(default, membership.CreatedAt);
+            Assert.Null(membership.RemovedAt);
+            Assert.DoesNotContain(
+                dbContext.TenantMemberships,
+                candidate => candidate.UserId == removedUserId);
+            await AssertForeignKeysAreValidAsync(dbContext);
+        }
+        finally
+        {
+            if (File.Exists(databasePath))
+            {
+                File.Delete(databasePath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Migration_rejects_duplicate_normalized_emails()
+    {
+        var databasePath = Path.Combine(
+            Path.GetTempPath(),
+            $"feature-lab-duplicate-email-{Guid.NewGuid():N}.db");
+
+        try
+        {
+            var options = new DbContextOptionsBuilder<FeatureLabDbContext>()
+                .UseSqlite($"Data Source={databasePath};Pooling=False")
+                .Options;
+            await using var dbContext =
+                new FeatureLabDbContext(options, new TenantContext());
+            await dbContext.Database.MigrateAsync(
+                "20260802100143_ScopeChatToTenant");
+
+            var firstUserId = $"first-email-user-{Guid.NewGuid():N}";
+            var secondUserId = $"second-email-user-{Guid.NewGuid():N}";
+            var firstUserName = $"first-email-{Guid.NewGuid():N}";
+            var secondUserName = $"second-email-{Guid.NewGuid():N}";
+            var sharedEmail = $"duplicate-{Guid.NewGuid():N}@example.test";
+            var normalizedEmail = sharedEmail.ToUpperInvariant();
+            await dbContext.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                INSERT INTO "AspNetUsers"
+                    ("Id", "UserName", "NormalizedUserName", "Email", "NormalizedEmail",
+                     "EmailConfirmed", "PhoneNumberConfirmed", "TwoFactorEnabled",
+                     "LockoutEnabled", "AccessFailedCount", "TenantId")
+                VALUES
+                    ({firstUserId}, {firstUserName}, {firstUserName.ToUpperInvariant()},
+                     {sharedEmail}, {normalizedEmail}, {false}, {false}, {false}, {true},
+                     {0}, {Guid.Empty}),
+                    ({secondUserId}, {secondUserName}, {secondUserName.ToUpperInvariant()},
+                     {sharedEmail}, {normalizedEmail}, {false}, {false}, {false}, {true},
+                     {0}, {Guid.Empty})
+                """);
+
+            var error = await Assert.ThrowsAsync<SqliteException>(
+                () => dbContext.Database.MigrateAsync());
+
+            Assert.Equal(19, error.SqliteErrorCode);
+            Assert.Contains(
+                "AspNetUsers.NormalizedEmail",
+                error.Message,
+                StringComparison.Ordinal);
         }
         finally
         {

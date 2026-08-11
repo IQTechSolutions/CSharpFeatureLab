@@ -117,6 +117,14 @@
       "playlist": "Multi-tenancy",
       "checkpoint": "episode/12-tenant-membership-revocation",
       "status": "release"
+    },
+    {
+      "number": 13,
+      "slug": "tenant-invitation-acceptance",
+      "title": "Join a Workspace with a Single-Use Invitation",
+      "playlist": "Multi-tenancy",
+      "checkpoint": "episode/13-tenant-invitation-acceptance",
+      "status": "release"
     }
   ]
 }

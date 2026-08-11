@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.Globalization;
 
 namespace FeatureLab.Tenancy;
 
@@ -7,6 +8,8 @@ public static class TenantMembership
     public const string Policy = "TenantMember";
 
     public const string ClaimType = "tenant_id";
+
+    public const string VersionClaimType = "tenant_membership_version";
 
     public static bool HasValidTenantId(ClaimsPrincipal principal) =>
         TryGetTenantId(principal, out _);
@@ -24,6 +27,25 @@ public static class TenantMembership
 
         return Guid.TryParse(tenantClaims[0].Value, out tenantId)
             && tenantId != Guid.Empty;
+    }
+
+    public static bool TryGetVersion(
+        ClaimsPrincipal principal,
+        out long version)
+    {
+        var versionClaims = principal.FindAll(VersionClaimType).ToArray();
+        if (versionClaims.Length != 1)
+        {
+            version = 0;
+            return false;
+        }
+
+        return long.TryParse(
+                versionClaims[0].Value,
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out version)
+            && version > 0;
     }
 }
 

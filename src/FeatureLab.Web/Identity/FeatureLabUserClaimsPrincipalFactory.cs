@@ -7,7 +7,8 @@ namespace FeatureLab.Identity;
 
 public sealed class FeatureLabUserClaimsPrincipalFactory(
     UserManager<FeatureLabUser> userManager,
-    IOptions<IdentityOptions> optionsAccessor)
+    IOptions<IdentityOptions> optionsAccessor,
+    ITenantMembershipStore memberships)
     : UserClaimsPrincipalFactory<FeatureLabUser>(
         userManager,
         optionsAccessor)
@@ -17,12 +18,20 @@ public sealed class FeatureLabUserClaimsPrincipalFactory(
     {
         var identity = await base.GenerateClaimsAsync(user);
 
-        if (user.TenantId != Guid.Empty)
+        var membershipVersion = await memberships.GetActiveVersionAsync(
+            user.Id,
+            user.TenantId);
+        if (membershipVersion is { } version)
         {
             identity.AddClaim(
                 new Claim(
                     TenantMembership.ClaimType,
                     user.TenantId.ToString()));
+            identity.AddClaim(
+                new Claim(
+                    TenantMembership.VersionClaimType,
+                    version.ToString(
+                        System.Globalization.CultureInfo.InvariantCulture)));
         }
 
         return identity;

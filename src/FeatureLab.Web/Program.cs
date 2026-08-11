@@ -33,7 +33,8 @@ builder.Services.AddAuthorizationBuilder()
             .RequireClaim(
                 WorkItemAuthorization.PermissionClaimType,
                 WorkItemAuthorization.CreatePermission));
-builder.Services.AddIdentityApiEndpoints<FeatureLabUser>()
+builder.Services.AddIdentityApiEndpoints<FeatureLabUser>(options =>
+    options.User.RequireUniqueEmail = true)
     .AddEntityFrameworkStores<FeatureLabDbContext>()
     .AddClaimsPrincipalFactory<FeatureLabUserClaimsPrincipalFactory>();
 builder.Services.AddHangfire(configuration =>
@@ -62,6 +63,7 @@ if (!builder.Environment.IsEnvironment("Testing"))
     builder.Services.AddHangfireServer();
 }
 builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddScoped<ITenantInvitationStore, EfTenantInvitationStore>();
 builder.Services.AddScoped<ITenantMembershipStore, EfTenantMembershipStore>();
 builder.Services.AddScoped<IAuthorizationHandler, ActiveTenantMembershipHandler>();
 builder.Services.AddScoped<IWorkItemReportService, EfWorkItemReportService>();
@@ -99,9 +101,10 @@ app.UseAuthorization();
 app.MapGet("/api/about", () => Results.Ok(new
 {
     application = "C# Feature Lab",
-    lesson = "Live tenant membership revocation",
+    lesson = "Single-use tenant invitation acceptance",
 }));
 app.MapGroup("/account").MapIdentityApi<FeatureLabUser>();
+app.MapTenantInvitationEndpoints();
 app.MapTenantMembershipEndpoints();
 app.MapWorkItemEndpoints();
 app.MapHub<ChatHub>(ChatHub.Route);

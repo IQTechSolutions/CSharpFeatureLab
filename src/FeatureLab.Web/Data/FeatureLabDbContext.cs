@@ -17,6 +17,11 @@ public sealed class FeatureLabDbContext(
 
     public DbSet<PersistedChatMessage> ChatMessages => Set<PersistedChatMessage>();
 
+    public DbSet<TenantInvitation> TenantInvitations => Set<TenantInvitation>();
+
+    public DbSet<TenantMembershipRecord> TenantMemberships =>
+        Set<TenantMembershipRecord>();
+
     public DbSet<WorkItemReport> WorkItemReports => Set<WorkItemReport>();
 
     public DbSet<WorkItem> WorkItems => Set<WorkItem>();
@@ -30,6 +35,79 @@ public sealed class FeatureLabDbContext(
         user.Property(member => member.TenantId)
             .IsRequired();
         user.HasIndex(member => member.TenantId);
+        user.HasIndex(member => member.NormalizedEmail)
+            .HasDatabaseName("EmailIndex")
+            .IsUnique();
+
+        var tenantMembership = modelBuilder.Entity<TenantMembershipRecord>();
+
+        tenantMembership.ToTable(
+            "TenantMemberships",
+            table => table.HasCheckConstraint(
+                "CK_TenantMemberships_Version_Positive",
+                "\"Version\" > 0"));
+        tenantMembership.HasKey(membership => new
+        {
+            membership.UserId,
+            membership.TenantId,
+        });
+        tenantMembership.Property(membership => membership.UserId)
+            .HasMaxLength(450)
+            .IsRequired();
+        tenantMembership.Property(membership => membership.TenantId)
+            .IsRequired();
+        tenantMembership.Property(membership => membership.Version)
+            .IsConcurrencyToken()
+            .IsRequired();
+        tenantMembership.Property(membership => membership.IsActive)
+            .IsRequired();
+        tenantMembership.Property(membership => membership.CreatedAt)
+            .IsRequired();
+        tenantMembership.HasOne<FeatureLabUser>()
+            .WithMany()
+            .HasForeignKey(membership => membership.UserId)
+            .OnDelete(DeleteBehavior.Cascade);
+        tenantMembership.HasIndex(membership => new
+        {
+            membership.TenantId,
+            membership.IsActive,
+        });
+
+        var tenantInvitation = modelBuilder.Entity<TenantInvitation>();
+
+        tenantInvitation.ToTable(
+            "TenantInvitations",
+            table => table.HasCheckConstraint(
+                "CK_TenantInvitations_Version_Positive",
+                "\"Version\" > 0"));
+        tenantInvitation.HasKey(invitation => invitation.Id);
+        tenantInvitation.Property(invitation => invitation.TenantId)
+            .IsRequired();
+        tenantInvitation.Property(invitation => invitation.NormalizedEmail)
+            .HasMaxLength(256)
+            .IsRequired();
+        tenantInvitation.Property(invitation => invitation.CodeHash)
+            .HasMaxLength(64)
+            .IsFixedLength()
+            .IsRequired();
+        tenantInvitation.Property(invitation => invitation.ExpiresAt)
+            .IsRequired();
+        tenantInvitation.Property(invitation => invitation.AcceptedByUserId)
+            .HasMaxLength(450);
+        tenantInvitation.Property(invitation => invitation.Version)
+            .IsConcurrencyToken()
+            .IsRequired();
+        tenantInvitation.HasIndex(invitation => invitation.CodeHash)
+            .IsUnique();
+        tenantInvitation.HasIndex(invitation => new
+        {
+            invitation.TenantId,
+            invitation.NormalizedEmail,
+        });
+        tenantInvitation.HasOne<FeatureLabUser>()
+            .WithMany()
+            .HasForeignKey(invitation => invitation.AcceptedByUserId)
+            .OnDelete(DeleteBehavior.Restrict);
 
         var chatMessage = modelBuilder.Entity<PersistedChatMessage>();
 

@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Claims;
+using FeatureLab.Data;
 using FeatureLab.Features.BackgroundJobs;
 using FeatureLab.Features.WorkItems;
 using FeatureLab.Identity;
@@ -9,6 +10,7 @@ using FeatureLab.Tenancy;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
@@ -115,7 +117,7 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
     }
 
     [Fact]
-    public async Task Registration_provisions_a_server_owned_tenant_membership()
+    public async Task Registration_does_not_invent_a_tenant_membership()
     {
         using var client = _factory.CreateClient();
         var email = $"new-member-{Guid.NewGuid():N}@example.test";
@@ -141,7 +143,17 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
 
         var response = await client.GetAsync("/api/work-items");
 
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+
+        await using var scope = _factory.Services.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider
+            .GetRequiredService<FeatureLabDbContext>();
+        var user = await dbContext.Users.SingleAsync(
+            user => user.Email == email);
+        Assert.Equal(Guid.Empty, user.TenantId);
+        Assert.DoesNotContain(
+            dbContext.TenantMemberships,
+            membership => membership.UserId == user.Id);
     }
 
     [Fact]
@@ -400,9 +412,9 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
         });
         registration.EnsureSuccessStatusCode();
 
-        if (!hasTenantMembership)
+        if (hasTenantMembership)
         {
-            await AssignTenantAsync(email, Guid.Empty);
+            await AssignTenantAsync(email, Guid.NewGuid());
         }
 
         if (canCreateWorkItems)
@@ -488,17 +500,10 @@ public sealed class WorkItemEndpointsTests : IClassFixture<FeatureLabWebFactory>
         string email,
         Guid tenantId)
     {
-        await using var scope = _factory.Services.CreateAsyncScope();
-        var userManager = scope.ServiceProvider.GetRequiredService<UserManager<FeatureLabUser>>();
-        var user = await userManager.FindByEmailAsync(email);
-        Assert.NotNull(user);
-
-        user.TenantId = tenantId;
-        var update = await userManager.UpdateAsync(user);
-
-        Assert.True(
-            update.Succeeded,
-            string.Join("; ", update.Errors.Select(error => error.Description)));
+        await TenantTestData.ProvisionAsync(
+            _factory.Services,
+            email,
+            tenantId);
     }
 
     private static async Task<WorkItemResponse> CreateWorkItemAsync(

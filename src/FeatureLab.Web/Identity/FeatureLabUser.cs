@@ -4,5 +4,5 @@ namespace FeatureLab.Identity;
 
 public sealed class FeatureLabUser : IdentityUser
 {
-    public Guid TenantId { get; set; } = Guid.NewGuid();
+    public Guid TenantId { get; set; }
 }

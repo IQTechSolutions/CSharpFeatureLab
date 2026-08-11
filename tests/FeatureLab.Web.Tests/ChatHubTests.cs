@@ -306,7 +306,8 @@ public sealed class ChatHubTests : IClassFixture<FeatureLabWebFactory>
         });
         registration.EnsureSuccessStatusCode();
 
-        if (tenantId is { } assignedTenantId)
+        var assignedTenantId = tenantId ?? Guid.NewGuid();
+        if (assignedTenantId != Guid.Empty)
         {
             await AssignTenantAsync(email, assignedTenantId);
         }
@@ -343,18 +344,10 @@ public sealed class ChatHubTests : IClassFixture<FeatureLabWebFactory>
 
     private async Task AssignTenantAsync(string email, Guid tenantId)
     {
-        await using var scope = _factory.Services.CreateAsyncScope();
-        var userManager = scope.ServiceProvider
-            .GetRequiredService<UserManager<FeatureLabUser>>();
-        var user = await userManager.FindByEmailAsync(email);
-        Assert.NotNull(user);
-        user.TenantId = tenantId;
-        var update = await userManager.UpdateAsync(user);
-        Assert.True(
-            update.Succeeded,
-            string.Join(
-                "; ",
-                update.Errors.Select(error => error.Description)));
+        await TenantTestData.ProvisionAsync(
+            _factory.Services,
+            email,
+            tenantId);
     }
 
     private async Task<string> SignInAsync(string email, string password)

@@ -1,9 +1,11 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using FeatureLab.Data;
 using FeatureLab.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace FeatureLab.Web.Tests;
@@ -24,6 +26,19 @@ public sealed class TenantMembershipEndpointsTests(
         var removal = await client.DeleteAsync("/api/tenant-membership");
         Assert.Equal(HttpStatusCode.NoContent, removal.StatusCode);
 
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var dbContext = scope.ServiceProvider
+                .GetRequiredService<FeatureLabDbContext>();
+            var removedUser = await dbContext.Users
+                .AsNoTracking()
+                .SingleAsync(user => user.Id == member.UserId);
+            Assert.NotEqual(member.SecurityStamp, removedUser.SecurityStamp);
+            Assert.NotEqual(
+                member.ConcurrencyStamp,
+                removedUser.ConcurrencyStamp);
+        }
+
         var afterRemoval = await client.GetAsync("/api/work-items");
         Assert.Equal(HttpStatusCode.Forbidden, afterRemoval.StatusCode);
     }
@@ -36,6 +51,28 @@ public sealed class TenantMembershipEndpointsTests(
         var response = await client.DeleteAsync("/api/tenant-membership");
 
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Concurrent_removal_has_one_winner()
+    {
+        var member = await RegisterMemberAsync(factory);
+        using var firstClient = member.Client;
+        using var secondClient = await SignInAsync(
+            factory,
+            member.Email);
+
+        var attempts = await Task.WhenAll(
+            firstClient.DeleteAsync("/api/tenant-membership"),
+            secondClient.DeleteAsync("/api/tenant-membership"));
+
+        Assert.Single(
+            attempts,
+            response => response.StatusCode == HttpStatusCode.NoContent);
+        Assert.Single(
+            attempts,
+            response => response.StatusCode is HttpStatusCode.NotFound
+                or HttpStatusCode.Forbidden);
     }
 
     [Fact]
@@ -76,6 +113,12 @@ public sealed class TenantMembershipEndpointsTests(
         });
         registration.EnsureSuccessStatusCode();
 
+        var tenantId = Guid.NewGuid();
+        await TenantTestData.ProvisionAsync(
+            factory.Services,
+            email,
+            tenantId);
+
         var login = await client.PostAsJsonAsync("/account/login", new
         {
             email,
@@ -97,8 +140,11 @@ public sealed class TenantMembershipEndpointsTests(
 
         return new RegisteredMember(
             client,
+            user.Id,
             email,
-            user.TenantId);
+            tenantId,
+            Assert.IsType<string>(user.SecurityStamp),
+            Assert.IsType<string>(user.ConcurrencyStamp));
     }
 
     private static async Task<HttpClient> SignInAsync(
@@ -126,22 +172,17 @@ public sealed class TenantMembershipEndpointsTests(
         string email,
         Guid tenantId)
     {
-        await using var scope = factory.Services.CreateAsyncScope();
-        var userManager = scope.ServiceProvider
-            .GetRequiredService<UserManager<FeatureLabUser>>();
-        var user = await userManager.FindByEmailAsync(email);
-        Assert.NotNull(user);
-        user.TenantId = tenantId;
-        var update = await userManager.UpdateAsync(user);
-        Assert.True(
-            update.Succeeded,
-            string.Join(
-                "; ",
-                update.Errors.Select(error => error.Description)));
+        await TenantTestData.ProvisionAsync(
+            factory.Services,
+            email,
+            tenantId);
     }
 
     private sealed record RegisteredMember(
         HttpClient Client,
+        string UserId,
         string Email,
-        Guid TenantId);
+        Guid TenantId,
+        string SecurityStamp,
+        string ConcurrencyStamp);
 }

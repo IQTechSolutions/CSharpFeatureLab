@@ -34,7 +34,10 @@ public sealed class ActiveTenantMembershipHandler(
             || string.IsNullOrWhiteSpace(securityStamps[0])
             || !TenantMembership.TryGetTenantId(
                 context.User,
-                out var tenantId))
+                out var tenantId)
+            || !TenantMembership.TryGetVersion(
+                context.User,
+                out var membershipVersion))
         {
             return;
         }
@@ -47,6 +50,7 @@ public sealed class ActiveTenantMembershipHandler(
             userId,
             tenantId,
             securityStamps[0],
+            membershipVersion,
             cancellationToken))
         {
             context.Succeed(requirement);

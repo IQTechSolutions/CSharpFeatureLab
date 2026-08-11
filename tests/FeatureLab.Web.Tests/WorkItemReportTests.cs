@@ -176,6 +176,11 @@ public sealed class WorkItemReportTests : IClassFixture<FeatureLabWebFactory>
         });
         registration.EnsureSuccessStatusCode();
 
+        await TenantTestData.ProvisionAsync(
+            _factory.Services,
+            email,
+            Guid.NewGuid());
+
         if (canCreateWorkItems)
         {
             await GrantClaimAsync(
