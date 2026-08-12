@@ -125,6 +125,14 @@
       "playlist": "Multi-tenancy",
       "checkpoint": "episode/13-tenant-invitation-acceptance",
       "status": "release"
+    },
+    {
+      "number": 14,
+      "slug": "tenant-membership-switching",
+      "title": "Switch Workspaces Without Another Invitation",
+      "playlist": "Multi-tenancy",
+      "checkpoint": "episode/14-tenant-membership-switching",
+      "status": "release"
     }
   ]
 }

@@ -101,7 +101,7 @@ app.UseAuthorization();
 app.MapGet("/api/about", () => Results.Ok(new
 {
     application = "C# Feature Lab",
-    lesson = "Single-use tenant invitation acceptance",
+    lesson = "Server-authorized workspace switching",
 }));
 app.MapGroup("/account").MapIdentityApi<FeatureLabUser>();
 app.MapTenantInvitationEndpoints();

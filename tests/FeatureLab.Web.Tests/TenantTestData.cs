@@ -10,7 +10,8 @@ internal static class TenantTestData
     public static async Task<(string UserId, Guid TenantId)> ProvisionAsync(
         IServiceProvider services,
         string email,
-        Guid tenantId)
+        Guid tenantId,
+        bool select = true)
     {
         if (tenantId == Guid.Empty)
         {
@@ -42,9 +43,12 @@ internal static class TenantTestData
             membership.Reactivate();
         }
 
-        user.TenantId = tenantId;
-        user.SecurityStamp = Guid.NewGuid().ToString("N");
-        user.ConcurrencyStamp = Guid.NewGuid().ToString("N");
+        if (select)
+        {
+            user.TenantId = tenantId;
+            user.SecurityStamp = Guid.NewGuid().ToString("N");
+            user.ConcurrencyStamp = Guid.NewGuid().ToString("N");
+        }
         await dbContext.SaveChangesAsync();
 
         return (user.Id, tenantId);
