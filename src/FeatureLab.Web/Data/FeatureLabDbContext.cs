@@ -43,9 +43,15 @@ public sealed class FeatureLabDbContext(
 
         tenantMembership.ToTable(
             "TenantMemberships",
-            table => table.HasCheckConstraint(
-                "CK_TenantMemberships_Version_Positive",
-                "\"Version\" > 0"));
+            table =>
+            {
+                table.HasCheckConstraint(
+                    "CK_TenantMemberships_Role_Valid",
+                    "\"Role\" IN (1, 2)");
+                table.HasCheckConstraint(
+                    "CK_TenantMemberships_Version_Positive",
+                    "\"Version\" > 0");
+            });
         tenantMembership.HasKey(membership => new
         {
             membership.UserId,
@@ -55,6 +61,8 @@ public sealed class FeatureLabDbContext(
             .HasMaxLength(450)
             .IsRequired();
         tenantMembership.Property(membership => membership.TenantId)
+            .IsRequired();
+        tenantMembership.Property(membership => membership.Role)
             .IsRequired();
         tenantMembership.Property(membership => membership.Version)
             .IsConcurrencyToken()
@@ -92,6 +100,8 @@ public sealed class FeatureLabDbContext(
             .IsRequired();
         tenantInvitation.Property(invitation => invitation.ExpiresAt)
             .IsRequired();
+        tenantInvitation.Property(invitation => invitation.IssuedByUserId)
+            .HasMaxLength(450);
         tenantInvitation.Property(invitation => invitation.AcceptedByUserId)
             .HasMaxLength(450);
         tenantInvitation.Property(invitation => invitation.Version)
@@ -103,10 +113,16 @@ public sealed class FeatureLabDbContext(
         {
             invitation.TenantId,
             invitation.NormalizedEmail,
-        });
+        })
+            .IsUnique()
+            .HasFilter("\"ClosedAt\" IS NULL");
         tenantInvitation.HasOne<FeatureLabUser>()
             .WithMany()
             .HasForeignKey(invitation => invitation.AcceptedByUserId)
+            .OnDelete(DeleteBehavior.Restrict);
+        tenantInvitation.HasOne<FeatureLabUser>()
+            .WithMany()
+            .HasForeignKey(invitation => invitation.IssuedByUserId)
             .OnDelete(DeleteBehavior.Restrict);
 
         var chatMessage = modelBuilder.Entity<PersistedChatMessage>();

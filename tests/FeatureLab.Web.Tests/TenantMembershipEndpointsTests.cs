@@ -406,14 +406,17 @@ public sealed class TenantMembershipEndpointsTests(
                     TenantMembershipRecord.Create(
                         userId,
                         initialTenantId,
+                        TenantMembershipRole.Owner,
                         DateTimeOffset.UtcNow),
                     TenantMembershipRecord.Create(
                         userId,
                         secondTenantId,
+                        TenantMembershipRole.Owner,
                         DateTimeOffset.UtcNow),
                     TenantMembershipRecord.Create(
                         userId,
                         thirdTenantId,
+                        TenantMembershipRole.Owner,
                         DateTimeOffset.UtcNow));
                 await seed.SaveChangesAsync();
             }
@@ -766,6 +769,14 @@ public sealed class TenantMembershipEndpointsTests(
             Task.FromResult<IReadOnlyList<TenantMembershipOption>?>([]);
 
         public Task<bool> IsActiveAsync(
+            string userId,
+            Guid tenantId,
+            string securityStamp,
+            long membershipVersion,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult(false);
+
+        public Task<bool> IsActiveOwnerAsync(
             string userId,
             Guid tenantId,
             string securityStamp,

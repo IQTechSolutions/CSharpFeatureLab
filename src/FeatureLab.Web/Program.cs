@@ -27,6 +27,11 @@ builder.Services.AddAuthorizationBuilder()
             .AddRequirements(
                 ActiveTenantMembershipRequirement.Instance))
     .AddPolicy(
+        TenantMembership.OwnerPolicy,
+        policy => policy
+            .RequireAuthenticatedUser()
+            .AddRequirements(TenantOwnerRequirement.Instance))
+    .AddPolicy(
         WorkItemAuthorization.CreatePolicy,
         policy => policy
             .RequireAuthenticatedUser()
@@ -66,6 +71,7 @@ builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<ITenantInvitationStore, EfTenantInvitationStore>();
 builder.Services.AddScoped<ITenantMembershipStore, EfTenantMembershipStore>();
 builder.Services.AddScoped<IAuthorizationHandler, ActiveTenantMembershipHandler>();
+builder.Services.AddScoped<IAuthorizationHandler, TenantOwnerHandler>();
 builder.Services.AddScoped<IWorkItemReportService, EfWorkItemReportService>();
 builder.Services.AddScoped<WorkItemReportJob>();
 builder.Services.AddSingleton<IWorkItemReportScheduler, HangfireWorkItemReportScheduler>();
@@ -101,7 +107,7 @@ app.UseAuthorization();
 app.MapGet("/api/about", () => Results.Ok(new
 {
     application = "C# Feature Lab",
-    lesson = "Server-authorized workspace switching",
+    lesson = "Owner-authorized workspace invitations",
 }));
 app.MapGroup("/account").MapIdentityApi<FeatureLabUser>();
 app.MapTenantInvitationEndpoints();

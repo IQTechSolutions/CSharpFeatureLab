@@ -17,6 +17,13 @@ public interface ITenantMembershipStore
         long membershipVersion,
         CancellationToken cancellationToken = default);
 
+    Task<bool> IsActiveOwnerAsync(
+        string userId,
+        Guid tenantId,
+        string securityStamp,
+        long membershipVersion,
+        CancellationToken cancellationToken = default);
+
     Task<long?> GetActiveVersionAsync(
         string userId,
         Guid tenantId,
@@ -111,6 +118,30 @@ public sealed class EfTenantMembershipStore(
                 where membership.UserId == userId
                     && membership.TenantId == tenantId
                     && membership.IsActive
+                    && membership.Version == membershipVersion
+                    && user.TenantId == tenantId
+                    && user.SecurityStamp == securityStamp
+                select membership)
+                .AnyAsync(cancellationToken);
+
+    public Task<bool> IsActiveOwnerAsync(
+        string userId,
+        Guid tenantId,
+        string securityStamp,
+        long membershipVersion,
+        CancellationToken cancellationToken = default) =>
+        tenantId == Guid.Empty
+            || membershipVersion <= 0
+            || string.IsNullOrWhiteSpace(securityStamp)
+            ? Task.FromResult(false)
+            : (
+                from membership in dbContext.TenantMemberships.AsNoTracking()
+                join user in dbContext.Users.AsNoTracking()
+                    on membership.UserId equals user.Id
+                where membership.UserId == userId
+                    && membership.TenantId == tenantId
+                    && membership.IsActive
+                    && membership.Role == TenantMembershipRole.Owner
                     && membership.Version == membershipVersion
                     && user.TenantId == tenantId
                     && user.SecurityStamp == securityStamp

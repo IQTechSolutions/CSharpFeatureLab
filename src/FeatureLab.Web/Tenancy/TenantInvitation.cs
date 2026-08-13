@@ -11,7 +11,8 @@ public sealed class TenantInvitation
         Guid tenantId,
         string normalizedEmail,
         string codeHash,
-        DateTimeOffset expiresAt)
+        DateTimeOffset expiresAt,
+        string? issuedByUserId)
     {
         if (id == Guid.Empty)
         {
@@ -41,11 +42,20 @@ public sealed class TenantInvitation
                 nameof(codeHash));
         }
 
+        if (issuedByUserId is not null
+            && string.IsNullOrWhiteSpace(issuedByUserId))
+        {
+            throw new ArgumentException(
+                "An issuer identifier cannot be blank.",
+                nameof(issuedByUserId));
+        }
+
         Id = id;
         TenantId = tenantId;
         NormalizedEmail = normalizedEmail;
         CodeHash = codeHash;
         ExpiresAt = expiresAt;
+        IssuedByUserId = issuedByUserId;
         Version = 1;
     }
 
@@ -59,6 +69,10 @@ public sealed class TenantInvitation
 
     public DateTimeOffset ExpiresAt { get; private set; }
 
+    public string? IssuedByUserId { get; private set; }
+
+    public DateTimeOffset? ClosedAt { get; private set; }
+
     public DateTimeOffset? AcceptedAt { get; private set; }
 
     public string? AcceptedByUserId { get; private set; }
@@ -69,19 +83,33 @@ public sealed class TenantInvitation
         Guid tenantId,
         string normalizedEmail,
         string codeHash,
-        DateTimeOffset expiresAt) =>
+        DateTimeOffset expiresAt,
+        string? issuedByUserId = null) =>
         new(
             Guid.NewGuid(),
             tenantId,
             normalizedEmail,
             codeHash,
-            expiresAt);
+            expiresAt,
+            issuedByUserId);
+
+    public void Close(DateTimeOffset closedAt)
+    {
+        if (ClosedAt is not null)
+        {
+            throw new InvalidOperationException(
+                "The tenant invitation is already closed.");
+        }
+
+        AdvanceVersion();
+        ClosedAt = closedAt;
+    }
 
     public void Accept(
         string userId,
         DateTimeOffset acceptedAt)
     {
-        if (AcceptedAt is not null)
+        if (AcceptedAt is not null || ClosedAt is not null)
         {
             throw new InvalidOperationException(
                 "The tenant invitation has already been accepted.");
@@ -94,14 +122,19 @@ public sealed class TenantInvitation
                 nameof(userId));
         }
 
+        AcceptedByUserId = userId;
+        AcceptedAt = acceptedAt;
+        Close(acceptedAt);
+    }
+
+    private void AdvanceVersion()
+    {
         if (Version == long.MaxValue)
         {
             throw new InvalidOperationException(
                 "The tenant invitation version cannot advance further.");
         }
 
-        AcceptedByUserId = userId;
-        AcceptedAt = acceptedAt;
         Version++;
     }
 }

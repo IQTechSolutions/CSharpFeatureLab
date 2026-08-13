@@ -1,3 +1,5 @@
+using System.Data;
+using System.Net.Mail;
 using System.Security.Cryptography;
 using System.Text;
 using FeatureLab.Data;
@@ -13,12 +15,34 @@ public sealed record IssuedTenantInvitation(
     Guid TenantId,
     DateTimeOffset ExpiresAt);
 
+public enum IssueTenantInvitationStatus
+{
+    Issued,
+    InvalidRecipient,
+    ActiveMember,
+    StaleOwner,
+    Conflict,
+}
+
+public sealed record IssueTenantInvitationResult(
+    IssueTenantInvitationStatus Status,
+    string? Code = null,
+    DateTimeOffset? ExpiresAt = null);
+
 public interface ITenantInvitationStore
 {
     Task<IssuedTenantInvitation> IssueAsync(
         Guid tenantId,
         string email,
         DateTimeOffset expiresAt,
+        CancellationToken cancellationToken = default);
+
+    Task<IssueTenantInvitationResult> IssueForOwnerAsync(
+        string userId,
+        string securityStamp,
+        long membershipVersion,
+        Guid tenantId,
+        string email,
         CancellationToken cancellationToken = default);
 
     Task<bool> AcceptAsync(
@@ -33,6 +57,8 @@ public sealed class EfTenantInvitationStore(
     ILookupNormalizer normalizer,
     TimeProvider timeProvider) : ITenantInvitationStore
 {
+    public static readonly TimeSpan InvitationLifetime = TimeSpan.FromHours(24);
+
     public const int MinimumCodeLength = 20;
 
     public const int MaximumCodeLength = 256;
@@ -50,8 +76,8 @@ public sealed class EfTenantInvitationStore(
                 nameof(tenantId));
         }
 
-        var normalizedEmail = normalizer.NormalizeEmail(email?.Trim());
-        if (string.IsNullOrWhiteSpace(normalizedEmail))
+        var normalizedEmail = NormalizeEmail(email);
+        if (normalizedEmail is null)
         {
             throw new ArgumentException(
                 "An email address is required.",
@@ -80,6 +106,121 @@ public sealed class EfTenantInvitationStore(
             code,
             invitation.TenantId,
             invitation.ExpiresAt);
+    }
+
+    public async Task<IssueTenantInvitationResult> IssueForOwnerAsync(
+        string userId,
+        string securityStamp,
+        long membershipVersion,
+        Guid tenantId,
+        string email,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(userId)
+            || string.IsNullOrWhiteSpace(securityStamp)
+            || membershipVersion <= 0
+            || tenantId == Guid.Empty)
+        {
+            return new(IssueTenantInvitationStatus.StaleOwner);
+        }
+
+        var normalizedEmail = NormalizeEmail(email);
+        if (normalizedEmail is null)
+        {
+            return new(IssueTenantInvitationStatus.InvalidRecipient);
+        }
+
+        try
+        {
+            await using var transaction =
+                await dbContext.Database.BeginTransactionAsync(
+                    IsolationLevel.Serializable,
+                    cancellationToken);
+            var isCurrentOwner = await (
+                    from membership in dbContext.TenantMemberships
+                        .AsNoTracking()
+                    join user in dbContext.Users.AsNoTracking()
+                        on membership.UserId equals user.Id
+                    where membership.UserId == userId
+                        && membership.TenantId == tenantId
+                        && membership.IsActive
+                        && membership.Role == TenantMembershipRole.Owner
+                        && membership.Version == membershipVersion
+                        && user.TenantId == tenantId
+                        && user.SecurityStamp == securityStamp
+                    select membership)
+                .AnyAsync(cancellationToken);
+            if (!isCurrentOwner)
+            {
+                return new(IssueTenantInvitationStatus.StaleOwner);
+            }
+
+            var targetUserId = await dbContext.Users
+                .AsNoTracking()
+                .Where(user => user.NormalizedEmail == normalizedEmail)
+                .Select(user => user.Id)
+                .SingleOrDefaultAsync(cancellationToken);
+            if (targetUserId is not null
+                && await dbContext.TenantMemberships
+                    .AsNoTracking()
+                    .AnyAsync(
+                        membership => membership.UserId == targetUserId
+                            && membership.TenantId == tenantId
+                            && membership.IsActive,
+                        cancellationToken))
+            {
+                return new(IssueTenantInvitationStatus.ActiveMember);
+            }
+
+            var now = timeProvider.GetUtcNow();
+            var pending = await dbContext.TenantInvitations
+                .SingleOrDefaultAsync(
+                    invitation => invitation.TenantId == tenantId
+                        && invitation.NormalizedEmail == normalizedEmail
+                        && invitation.ClosedAt == null,
+                    cancellationToken);
+            if (pending is not null)
+            {
+                if (pending.ExpiresAt > now)
+                {
+                    return new(IssueTenantInvitationStatus.Conflict);
+                }
+
+                pending.Close(now);
+                await dbContext.SaveChangesAsync(cancellationToken);
+            }
+
+            var code = WebEncoders.Base64UrlEncode(
+                RandomNumberGenerator.GetBytes(32));
+            var invitation = TenantInvitation.Create(
+                tenantId,
+                normalizedEmail,
+                Hash(code),
+                now.Add(InvitationLifetime),
+                userId);
+            dbContext.TenantInvitations.Add(invitation);
+            await dbContext.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+
+            return new(
+                IssueTenantInvitationStatus.Issued,
+                code,
+                invitation.ExpiresAt);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            return new(IssueTenantInvitationStatus.Conflict);
+        }
+        catch (DbUpdateException exception)
+            when (IsInvitationConflict(exception))
+        {
+            return new(IssueTenantInvitationStatus.Conflict);
+        }
+        catch (SqliteException exception)
+            when (exception.SqliteErrorCode is 5 or 6 or 19)
+        {
+            return new(IssueTenantInvitationStatus.Conflict);
+        }
     }
 
     public async Task<bool> AcceptAsync(
@@ -119,6 +260,7 @@ public sealed class EfTenantInvitationStore(
                 cancellationToken);
         if (invitation is null
             || invitation.AcceptedAt is not null
+            || invitation.ClosedAt is not null
             || invitation.ExpiresAt <= now
             || !string.Equals(
                 invitation.NormalizedEmail,
@@ -135,6 +277,15 @@ public sealed class EfTenantInvitationStore(
                 cancellationToken);
         if (membership is { IsActive: true })
         {
+            invitation.Close(now);
+            try
+            {
+                await dbContext.SaveChangesAsync(cancellationToken);
+            }
+            catch (DbUpdateConcurrencyException)
+            {
+            }
+
             return false;
         }
 
@@ -145,11 +296,12 @@ public sealed class EfTenantInvitationStore(
                 TenantMembershipRecord.Create(
                     user.Id,
                     invitation.TenantId,
+                    TenantMembershipRole.Member,
                     now));
         }
         else
         {
-            membership.Reactivate();
+            membership.Reactivate(TenantMembershipRole.Member);
         }
 
         user.TenantId = invitation.TenantId;
@@ -177,6 +329,40 @@ public sealed class EfTenantInvitationStore(
     private static string Hash(string code) =>
         Convert.ToHexString(
             SHA256.HashData(Encoding.UTF8.GetBytes(code)));
+
+    private string? NormalizeEmail(string? email)
+    {
+        var trimmed = email?.Trim();
+        if (string.IsNullOrWhiteSpace(trimmed)
+            || trimmed.Length > 256
+            || !MailAddress.TryCreate(trimmed, out var parsed)
+            || !string.Equals(
+                parsed.Address,
+                trimmed,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var normalized = normalizer.NormalizeEmail(trimmed);
+        return string.IsNullOrWhiteSpace(normalized)
+            || normalized.Length > 256
+            ? null
+            : normalized;
+    }
+
+    private static bool IsInvitationConflict(
+        DbUpdateException exception) =>
+        exception.InnerException is SqliteException
+        {
+            SqliteErrorCode: 19,
+        } sqliteException
+        && sqliteException.Message.Contains(
+            "TenantInvitations.TenantId",
+            StringComparison.Ordinal)
+        && sqliteException.Message.Contains(
+            "TenantInvitations.NormalizedEmail",
+            StringComparison.Ordinal);
 
     private static bool IsConcurrentMembershipInsert(
         DbUpdateException exception) =>

@@ -10,6 +10,66 @@ public static class TenantInvitationEndpoints
         this IEndpointRouteBuilder endpoints)
     {
         endpoints.MapPost(
+                "/api/tenant-invitations",
+                async (
+                    IssueTenantInvitationRequest request,
+                    ClaimsPrincipal principal,
+                    HttpContext httpContext,
+                    ITenantContext tenant,
+                    ITenantInvitationStore invitations,
+                    IOptions<IdentityOptions> identityOptions,
+                    CancellationToken cancellationToken) =>
+                {
+                    var userId = principal.FindFirstValue(
+                        ClaimTypes.NameIdentifier);
+                    if (string.IsNullOrWhiteSpace(userId))
+                    {
+                        return Results.Unauthorized();
+                    }
+
+                    var securityStamps = principal.FindAll(
+                            identityOptions.Value.ClaimsIdentity
+                                .SecurityStampClaimType)
+                        .Select(claim => claim.Value)
+                        .ToArray();
+                    if (securityStamps.Length != 1
+                        || string.IsNullOrWhiteSpace(securityStamps[0])
+                        || !TenantMembership.TryGetVersion(
+                            principal,
+                            out var membershipVersion))
+                    {
+                        return Results.Forbid();
+                    }
+
+                    var result = await invitations.IssueForOwnerAsync(
+                        userId,
+                        securityStamps[0],
+                        membershipVersion,
+                        tenant.Id,
+                        request.Email ?? string.Empty,
+                        cancellationToken);
+
+                    return result.Status switch
+                    {
+                        IssueTenantInvitationStatus.Issued
+                            => CreatedInvitation(httpContext, result),
+                        IssueTenantInvitationStatus.InvalidRecipient
+                            => InvalidRecipient(),
+                        IssueTenantInvitationStatus.ActiveMember
+                            or IssueTenantInvitationStatus.Conflict
+                            => Results.Conflict(new
+                            {
+                                error = "An invitation cannot be issued for this recipient.",
+                            }),
+                        IssueTenantInvitationStatus.StaleOwner
+                            => Results.Forbid(),
+                        _ => throw new InvalidOperationException(
+                            "Unknown invitation issuance result."),
+                    };
+                })
+            .RequireAuthorization(TenantMembership.OwnerPolicy);
+
+        endpoints.MapPost(
                 "/api/tenant-invitations/accept",
                 async (
                     AcceptTenantInvitationRequest request,
@@ -52,6 +112,28 @@ public static class TenantInvitationEndpoints
     }
 
     public sealed record AcceptTenantInvitationRequest(string? Code);
+
+    public sealed record IssueTenantInvitationRequest(string? Email);
+
+    private static IResult CreatedInvitation(
+        HttpContext httpContext,
+        IssueTenantInvitationResult result)
+    {
+        httpContext.Response.Headers.CacheControl = "no-store";
+        return Results.Json(
+            new
+            {
+                result.Code,
+                result.ExpiresAt,
+            },
+            statusCode: StatusCodes.Status201Created);
+    }
+
+    private static IResult InvalidRecipient() =>
+        Results.BadRequest(new
+        {
+            error = "A valid invitation email is required.",
+        });
 
     private static IResult CannotAccept() =>
         Results.BadRequest(new

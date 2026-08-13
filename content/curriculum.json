@@ -133,6 +133,14 @@
       "playlist": "Multi-tenancy",
       "checkpoint": "episode/14-tenant-membership-switching",
       "status": "release"
+    },
+    {
+      "number": 15,
+      "slug": "tenant-invitation-issuance",
+      "title": "Let Only Workspace Owners Issue Invitations",
+      "playlist": "Multi-tenancy",
+      "checkpoint": "episode/15-tenant-invitation-issuance",
+      "status": "release"
     }
   ]
 }

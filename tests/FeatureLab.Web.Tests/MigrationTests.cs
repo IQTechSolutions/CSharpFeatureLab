@@ -31,6 +31,93 @@ public sealed class MigrationTests
                 migration => migration.EndsWith(
                     "_AddVersionedMembershipInvitations",
                     StringComparison.Ordinal));
+            Assert.Contains(
+                appliedMigrations,
+                migration => migration.EndsWith(
+                    "_AddTenantOwnerInvitationIssuance",
+                    StringComparison.Ordinal));
+            Assert.Empty(await dbContext.Database.GetPendingMigrationsAsync());
+            await AssertForeignKeysAreValidAsync(dbContext);
+        }
+        finally
+        {
+            if (File.Exists(databasePath))
+            {
+                File.Delete(databasePath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Owner_migration_fail_closes_legacy_pending_codes_before_unique_index()
+    {
+        var databasePath = Path.Combine(
+            Path.GetTempPath(),
+            $"feature-lab-invitation-upgrade-{Guid.NewGuid():N}.db");
+
+        try
+        {
+            var options = new DbContextOptionsBuilder<FeatureLabDbContext>()
+                .UseSqlite($"Data Source={databasePath};Pooling=False")
+                .Options;
+            await using var dbContext =
+                new FeatureLabDbContext(options, new TenantContext());
+            await dbContext.Database.MigrateAsync(
+                "20260811061731_AddVersionedMembershipInvitations");
+
+            var userId = $"legacy-invite-user-{Guid.NewGuid():N}";
+            var email = $"legacy-invite-{Guid.NewGuid():N}@example.test";
+            var normalizedEmail = email.ToUpperInvariant();
+            var tenantId = Guid.NewGuid();
+            await dbContext.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                INSERT INTO "AspNetUsers"
+                    ("Id", "UserName", "NormalizedUserName", "Email",
+                     "NormalizedEmail", "EmailConfirmed", "PhoneNumberConfirmed",
+                     "TwoFactorEnabled", "LockoutEnabled", "AccessFailedCount",
+                     "TenantId")
+                VALUES
+                    ({userId}, {email}, {normalizedEmail}, {email},
+                     {normalizedEmail}, {false}, {false}, {false}, {true}, {0},
+                     {tenantId})
+                """);
+            await dbContext.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                INSERT INTO "TenantMemberships"
+                    ("UserId", "TenantId", "Version", "IsActive", "CreatedAt",
+                     "RemovedAt")
+                VALUES
+                    ({userId}, {tenantId}, {1}, {true},
+                     {DateTimeOffset.UtcNow}, {null})
+                """);
+            await dbContext.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                INSERT INTO "TenantInvitations"
+                    ("Id", "TenantId", "NormalizedEmail", "CodeHash", "ExpiresAt",
+                     "AcceptedAt", "AcceptedByUserId", "Version")
+                VALUES
+                    ({Guid.NewGuid()}, {tenantId}, {normalizedEmail},
+                     {new string('A', 64)}, {DateTimeOffset.UtcNow.AddDays(7)},
+                     {null}, {null}, {1}),
+                    ({Guid.NewGuid()}, {tenantId}, {normalizedEmail},
+                     {new string('B', 64)}, {DateTimeOffset.UtcNow.AddDays(7)},
+                     {null}, {null}, {1})
+                """);
+
+            var beforeUpgrade = DateTimeOffset.UtcNow.AddSeconds(-1);
+            await dbContext.Database.MigrateAsync();
+            var afterUpgrade = DateTimeOffset.UtcNow.AddSeconds(1);
+
+            var legacyInvitations = await dbContext.TenantInvitations
+                .Where(invitation => invitation.TenantId == tenantId)
+                .ToListAsync();
+            Assert.Equal(2, legacyInvitations.Count);
+            Assert.All(
+                legacyInvitations,
+                invitation => Assert.InRange(
+                    invitation.ClosedAt!.Value,
+                    beforeUpgrade,
+                    afterUpgrade));
             Assert.Empty(await dbContext.Database.GetPendingMigrationsAsync());
             await AssertForeignKeysAreValidAsync(dbContext);
         }
@@ -94,6 +181,7 @@ public sealed class MigrationTests
             var membership = await dbContext.TenantMemberships.SingleAsync();
             Assert.Equal(activeUserId, membership.UserId);
             Assert.Equal(tenantId, membership.TenantId);
+            Assert.Equal(TenantMembershipRole.Member, membership.Role);
             Assert.Equal(1, membership.Version);
             Assert.True(membership.IsActive);
             Assert.NotEqual(default, membership.CreatedAt);
@@ -385,6 +473,63 @@ public sealed class MigrationTests
 
             Assert.Contains(
                 "CHECK constraint failed",
+                error.Message,
+                StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (File.Exists(databasePath))
+            {
+                File.Delete(databasePath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Membership_role_constraint_rejects_unknown_values()
+    {
+        var databasePath = Path.Combine(
+            Path.GetTempPath(),
+            $"feature-lab-role-constraint-{Guid.NewGuid():N}.db");
+
+        try
+        {
+            var options = new DbContextOptionsBuilder<FeatureLabDbContext>()
+                .UseSqlite($"Data Source={databasePath};Pooling=False")
+                .Options;
+            await using var dbContext =
+                new FeatureLabDbContext(options, new TenantContext());
+            await dbContext.Database.MigrateAsync();
+            var userId = $"role-user-{Guid.NewGuid():N}";
+            var email = $"role-{Guid.NewGuid():N}@example.test";
+            var tenantId = Guid.NewGuid();
+            await dbContext.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                INSERT INTO "AspNetUsers"
+                    ("Id", "UserName", "NormalizedUserName", "Email",
+                     "NormalizedEmail", "EmailConfirmed", "PhoneNumberConfirmed",
+                     "TwoFactorEnabled", "LockoutEnabled", "AccessFailedCount",
+                     "TenantId")
+                VALUES
+                    ({userId}, {email}, {email.ToUpperInvariant()}, {email},
+                     {email.ToUpperInvariant()}, {false}, {false}, {false}, {true},
+                     {0}, {tenantId})
+                """);
+
+            var error = await Assert.ThrowsAsync<SqliteException>(
+                () => dbContext.Database.ExecuteSqlInterpolatedAsync(
+                    $"""
+                    INSERT INTO "TenantMemberships"
+                        ("UserId", "TenantId", "Role", "Version", "IsActive",
+                         "CreatedAt", "RemovedAt")
+                    VALUES
+                        ({userId}, {tenantId}, {0}, {1}, {true},
+                         {DateTimeOffset.UtcNow}, {null})
+                    """));
+
+            Assert.Equal(19, error.SqliteErrorCode);
+            Assert.Contains(
+                "CK_TenantMemberships_Role_Valid",
                 error.Message,
                 StringComparison.Ordinal);
         }

@@ -95,6 +95,8 @@ public sealed class TenantInvitationEndpointsTests(
                 && existing.IsActive);
         Assert.Equal(user.Id, storedInvitation.AcceptedByUserId);
         Assert.NotNull(storedInvitation.AcceptedAt);
+        Assert.Equal(storedInvitation.AcceptedAt, storedInvitation.ClosedAt);
+        Assert.Equal(TenantMembershipRole.Member, membership.Role);
         Assert.Equal(2, storedInvitation.Version);
         Assert.NotEqual(invitation.Code, storedInvitation.CodeHash);
         Assert.Equal(64, storedInvitation.CodeHash.Length);

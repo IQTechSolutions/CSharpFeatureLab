@@ -7,6 +7,8 @@ public static class TenantMembership
 {
     public const string Policy = "TenantMember";
 
+    public const string OwnerPolicy = "TenantOwner";
+
     public const string ClaimType = "tenant_id";
 
     public const string VersionClaimType = "tenant_membership_version";

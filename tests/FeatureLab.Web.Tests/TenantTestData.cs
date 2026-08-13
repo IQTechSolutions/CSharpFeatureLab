@@ -11,7 +11,8 @@ internal static class TenantTestData
         IServiceProvider services,
         string email,
         Guid tenantId,
-        bool select = true)
+        bool select = true,
+        TenantMembershipRole role = TenantMembershipRole.Member)
     {
         if (tenantId == Guid.Empty)
         {
@@ -36,11 +37,12 @@ internal static class TenantTestData
                 TenantMembershipRecord.Create(
                     user.Id,
                     tenantId,
+                    role,
                     DateTimeOffset.UtcNow));
         }
         else if (!membership.IsActive)
         {
-            membership.Reactivate();
+            membership.Reactivate(role);
         }
 
         if (select)
