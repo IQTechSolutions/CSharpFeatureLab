@@ -44,7 +44,8 @@ public sealed class TenantInvitationIssuanceTests(
         Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
         var json = JsonDocument.Parse(
             await response.Content.ReadAsStringAsync());
-        Assert.Equal(2, json.RootElement.EnumerateObject().Count());
+        Assert.Equal(3, json.RootElement.EnumerateObject().Count());
+        var invitationId = json.RootElement.GetProperty("id").GetGuid();
         var code = json.RootElement.GetProperty("code").GetString();
         var expiresAt = json.RootElement.GetProperty("expiresAt")
             .GetDateTimeOffset();
@@ -63,6 +64,7 @@ public sealed class TenantInvitationIssuanceTests(
             .GetRequiredService<ILookupNormalizer>();
         var invitation = await dbContext.TenantInvitations.SingleAsync(
             invitation => invitation.IssuedByUserId == owner.UserId);
+        Assert.Equal(invitationId, invitation.Id);
         Assert.Equal(tenantId, invitation.TenantId);
         Assert.Equal(
             normalizer.NormalizeEmail(recipientEmail),
@@ -440,6 +442,417 @@ public sealed class TenantInvitationIssuanceTests(
         Assert.Equal(3, membership.Version);
     }
 
+    [Fact]
+    public async Task Owner_cancels_pending_invitation_without_sending_its_code()
+    {
+        var tenantId = Guid.NewGuid();
+        using var owner = await RegisterMemberAsync(
+            tenantId,
+            TenantMembershipRole.Owner);
+        using var recipient = await RegisterUnscopedAsync();
+        var issue = await owner.Client.PostAsJsonAsync(
+            "/api/tenant-invitations",
+            new { email = recipient.Email });
+        var issued = await issue.Content
+            .ReadFromJsonAsync<IssueInvitationResponse>();
+        Assert.NotNull(issued);
+
+        var cancellation = await owner.Client.DeleteAsync(
+            $"/api/tenant-invitations/{issued.Id}");
+        var rejectedAcceptance = await recipient.Client.PostAsJsonAsync(
+            "/api/tenant-invitations/accept",
+            new { code = issued.Code });
+
+        Assert.Equal(HttpStatusCode.NoContent, cancellation.StatusCode);
+        Assert.Equal(HttpStatusCode.BadRequest, rejectedAcceptance.StatusCode);
+        await using var scope = factory.Services.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider
+            .GetRequiredService<FeatureLabDbContext>();
+        var invitation = await dbContext.TenantInvitations.SingleAsync(
+            invitation => invitation.Id == issued.Id);
+        var recipientUser = await dbContext.Users.SingleAsync(
+            user => user.Id == recipient.UserId);
+        Assert.NotNull(invitation.ClosedAt);
+        Assert.Null(invitation.AcceptedAt);
+        Assert.Null(invitation.AcceptedByUserId);
+        Assert.Equal(2, invitation.Version);
+        Assert.Equal(owner.UserId, invitation.IssuedByUserId);
+        Assert.Equal(Hash(issued.Code), invitation.CodeHash);
+        Assert.Equal(Guid.Empty, recipientUser.TenantId);
+        Assert.DoesNotContain(
+            dbContext.TenantMemberships,
+            membership => membership.UserId == recipient.UserId
+                && membership.TenantId == tenantId);
+    }
+
+    [Fact]
+    public async Task Repeated_cancellation_is_an_idempotent_no_op()
+    {
+        var tenantId = Guid.NewGuid();
+        using var owner = await RegisterMemberAsync(
+            tenantId,
+            TenantMembershipRole.Owner);
+        using var recipient = await RegisterUnscopedAsync();
+        var issue = await owner.Client.PostAsJsonAsync(
+            "/api/tenant-invitations",
+            new { email = recipient.Email });
+        var issued = await issue.Content
+            .ReadFromJsonAsync<IssueInvitationResponse>();
+        Assert.NotNull(issued);
+
+        var first = await owner.Client.DeleteAsync(
+            $"/api/tenant-invitations/{issued.Id}");
+        var repeated = await owner.Client.DeleteAsync(
+            $"/api/tenant-invitations/{issued.Id}");
+
+        Assert.Equal(HttpStatusCode.NoContent, first.StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, repeated.StatusCode);
+        await using var scope = factory.Services.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider
+            .GetRequiredService<FeatureLabDbContext>();
+        var invitation = await dbContext.TenantInvitations.SingleAsync(
+            invitation => invitation.Id == issued.Id);
+        Assert.Equal(2, invitation.Version);
+    }
+
+    [Fact]
+    public async Task Member_and_anonymous_callers_cannot_cancel_an_invitation()
+    {
+        var tenantId = Guid.NewGuid();
+        using var owner = await RegisterMemberAsync(
+            tenantId,
+            TenantMembershipRole.Owner);
+        using var member = await RegisterMemberAsync(
+            tenantId,
+            TenantMembershipRole.Member);
+        using var recipient = await RegisterUnscopedAsync();
+        var issue = await owner.Client.PostAsJsonAsync(
+            "/api/tenant-invitations",
+            new { email = recipient.Email });
+        var issued = await issue.Content
+            .ReadFromJsonAsync<IssueInvitationResponse>();
+        Assert.NotNull(issued);
+        using var anonymous = factory.CreateClient();
+
+        var memberAttempt = await member.Client.DeleteAsync(
+            $"/api/tenant-invitations/{issued.Id}");
+        var anonymousAttempt = await anonymous.DeleteAsync(
+            $"/api/tenant-invitations/{issued.Id}");
+
+        Assert.Equal(HttpStatusCode.Forbidden, memberAttempt.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, anonymousAttempt.StatusCode);
+        Assert.Equal(1, await PendingInvitationCountAsync(
+            tenantId,
+            recipient.Email));
+    }
+
+    [Fact]
+    public async Task Another_workspace_owner_gets_the_same_no_op_as_a_missing_id()
+    {
+        var sourceTenantId = Guid.NewGuid();
+        using var sourceOwner = await RegisterMemberAsync(
+            sourceTenantId,
+            TenantMembershipRole.Owner);
+        var otherTenantId = Guid.NewGuid();
+        using var otherOwner = await RegisterMemberAsync(
+            otherTenantId,
+            TenantMembershipRole.Owner);
+        using var recipient = await RegisterUnscopedAsync();
+        var issue = await sourceOwner.Client.PostAsJsonAsync(
+            "/api/tenant-invitations",
+            new { email = recipient.Email });
+        var issued = await issue.Content
+            .ReadFromJsonAsync<IssueInvitationResponse>();
+        Assert.NotNull(issued);
+
+        var crossTenant = await otherOwner.Client.DeleteAsync(
+            $"/api/tenant-invitations/{issued.Id}");
+        var missing = await otherOwner.Client.DeleteAsync(
+            $"/api/tenant-invitations/{Guid.NewGuid()}");
+
+        Assert.Equal(HttpStatusCode.NoContent, crossTenant.StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, missing.StatusCode);
+        Assert.Equal(1, await PendingInvitationCountAsync(
+            sourceTenantId,
+            recipient.Email));
+    }
+
+    [Fact]
+    public async Task Accepted_and_missing_invitations_are_indistinguishable_to_cancel()
+    {
+        var tenantId = Guid.NewGuid();
+        using var owner = await RegisterMemberAsync(
+            tenantId,
+            TenantMembershipRole.Owner);
+        using var recipient = await RegisterUnscopedAsync();
+        var issue = await owner.Client.PostAsJsonAsync(
+            "/api/tenant-invitations",
+            new { email = recipient.Email });
+        var issued = await issue.Content
+            .ReadFromJsonAsync<IssueInvitationResponse>();
+        Assert.NotNull(issued);
+        var acceptance = await recipient.Client.PostAsJsonAsync(
+            "/api/tenant-invitations/accept",
+            new { code = issued.Code });
+        Assert.Equal(HttpStatusCode.NoContent, acceptance.StatusCode);
+
+        var accepted = await owner.Client.DeleteAsync(
+            $"/api/tenant-invitations/{issued.Id}");
+        var missing = await owner.Client.DeleteAsync(
+            $"/api/tenant-invitations/{Guid.NewGuid()}");
+
+        Assert.Equal(HttpStatusCode.NoContent, accepted.StatusCode);
+        Assert.Equal(HttpStatusCode.NoContent, missing.StatusCode);
+        await using var scope = factory.Services.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider
+            .GetRequiredService<FeatureLabDbContext>();
+        var invitation = await dbContext.TenantInvitations.SingleAsync(
+            invitation => invitation.Id == issued.Id);
+        var membership = await dbContext.TenantMemberships.SingleAsync(
+            membership => membership.UserId == recipient.UserId
+                && membership.TenantId == tenantId);
+        var user = await dbContext.Users.SingleAsync(
+            user => user.Id == recipient.UserId);
+        Assert.NotNull(invitation.AcceptedAt);
+        Assert.Equal(recipient.UserId, invitation.AcceptedByUserId);
+        Assert.Equal(2, invitation.Version);
+        Assert.True(membership.IsActive);
+        Assert.Equal(tenantId, user.TenantId);
+    }
+
+    [Fact]
+    public async Task Stale_owner_session_cannot_cancel_a_pending_invitation()
+    {
+        var tenantId = Guid.NewGuid();
+        using var owner = await RegisterMemberAsync(
+            tenantId,
+            TenantMembershipRole.Owner);
+        using var recipient = await RegisterUnscopedAsync();
+        var issue = await owner.Client.PostAsJsonAsync(
+            "/api/tenant-invitations",
+            new { email = recipient.Email });
+        var issued = await issue.Content
+            .ReadFromJsonAsync<IssueInvitationResponse>();
+        Assert.NotNull(issued);
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var dbContext = scope.ServiceProvider
+                .GetRequiredService<FeatureLabDbContext>();
+            var membership = await dbContext.TenantMemberships.SingleAsync(
+                membership => membership.UserId == owner.UserId
+                    && membership.TenantId == tenantId);
+            membership.Remove(DateTimeOffset.UtcNow);
+            membership.Reactivate(TenantMembershipRole.Owner);
+            await dbContext.SaveChangesAsync();
+        }
+
+        var response = await owner.Client.DeleteAsync(
+            $"/api/tenant-invitations/{issued.Id}");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal(1, await PendingInvitationCountAsync(
+            tenantId,
+            recipient.Email));
+    }
+
+    [Fact]
+    public async Task Stale_identity_stamp_cannot_cancel_a_pending_invitation()
+    {
+        var tenantId = Guid.NewGuid();
+        using var owner = await RegisterMemberAsync(
+            tenantId,
+            TenantMembershipRole.Owner);
+        using var recipient = await RegisterUnscopedAsync();
+        var issue = await owner.Client.PostAsJsonAsync(
+            "/api/tenant-invitations",
+            new { email = recipient.Email });
+        var issued = await issue.Content
+            .ReadFromJsonAsync<IssueInvitationResponse>();
+        Assert.NotNull(issued);
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var dbContext = scope.ServiceProvider
+                .GetRequiredService<FeatureLabDbContext>();
+            var user = await dbContext.Users.SingleAsync(
+                user => user.Id == owner.UserId);
+            user.SecurityStamp = Guid.NewGuid().ToString("N");
+            await dbContext.SaveChangesAsync();
+        }
+
+        var response = await owner.Client.DeleteAsync(
+            $"/api/tenant-invitations/{issued.Id}");
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal(1, await PendingInvitationCountAsync(
+            tenantId,
+            recipient.Email));
+    }
+
+    [Fact]
+    public async Task Another_current_owner_can_cancel_without_being_the_issuer()
+    {
+        var tenantId = Guid.NewGuid();
+        using var issuer = await RegisterMemberAsync(
+            tenantId,
+            TenantMembershipRole.Owner);
+        using var otherOwner = await RegisterMemberAsync(
+            tenantId,
+            TenantMembershipRole.Owner);
+        using var recipient = await RegisterUnscopedAsync();
+        var issue = await issuer.Client.PostAsJsonAsync(
+            "/api/tenant-invitations",
+            new { email = recipient.Email });
+        var issued = await issue.Content
+            .ReadFromJsonAsync<IssueInvitationResponse>();
+        Assert.NotNull(issued);
+
+        var response = await otherOwner.Client.DeleteAsync(
+            $"/api/tenant-invitations/{issued.Id}");
+
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+        await using var scope = factory.Services.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider
+            .GetRequiredService<FeatureLabDbContext>();
+        var invitation = await dbContext.TenantInvitations.SingleAsync(
+            invitation => invitation.Id == issued.Id);
+        Assert.NotNull(invitation.ClosedAt);
+        Assert.Equal(issuer.UserId, invitation.IssuedByUserId);
+        Assert.NotEqual(otherOwner.UserId, invitation.IssuedByUserId);
+    }
+
+    [Fact]
+    public async Task Cancellation_releases_the_recipient_slot_for_a_new_code()
+    {
+        var tenantId = Guid.NewGuid();
+        using var owner = await RegisterMemberAsync(
+            tenantId,
+            TenantMembershipRole.Owner);
+        using var recipient = await RegisterUnscopedAsync();
+        var firstIssue = await owner.Client.PostAsJsonAsync(
+            "/api/tenant-invitations",
+            new { email = recipient.Email });
+        var first = await firstIssue.Content
+            .ReadFromJsonAsync<IssueInvitationResponse>();
+        Assert.NotNull(first);
+        var cancellation = await owner.Client.DeleteAsync(
+            $"/api/tenant-invitations/{first.Id}");
+        Assert.Equal(HttpStatusCode.NoContent, cancellation.StatusCode);
+
+        var secondIssue = await owner.Client.PostAsJsonAsync(
+            "/api/tenant-invitations",
+            new { email = recipient.Email });
+        var second = await secondIssue.Content
+            .ReadFromJsonAsync<IssueInvitationResponse>();
+
+        Assert.Equal(HttpStatusCode.Created, secondIssue.StatusCode);
+        Assert.NotNull(second);
+        Assert.NotEqual(first.Id, second.Id);
+        Assert.NotEqual(first.Code, second.Code);
+        Assert.Equal(1, await PendingInvitationCountAsync(
+            tenantId,
+            recipient.Email));
+    }
+
+    [Fact]
+    public async Task Concurrent_acceptance_and_cancellation_leave_one_terminal_state()
+    {
+        var tenantId = Guid.NewGuid();
+        using var owner = await RegisterMemberAsync(
+            tenantId,
+            TenantMembershipRole.Owner);
+        using var recipient = await RegisterUnscopedAsync();
+        using var secondRecipientSession = await SignInAsync(
+            recipient.Email,
+            recipient.Password);
+        var issue = await owner.Client.PostAsJsonAsync(
+            "/api/tenant-invitations",
+            new { email = recipient.Email });
+        var issued = await issue.Content
+            .ReadFromJsonAsync<IssueInvitationResponse>();
+        Assert.NotNull(issued);
+
+        var attempts = await Task.WhenAll(
+            owner.Client.DeleteAsync(
+                $"/api/tenant-invitations/{issued.Id}"),
+            secondRecipientSession.PostAsJsonAsync(
+                "/api/tenant-invitations/accept",
+                new { code = issued.Code }));
+
+        Assert.Contains(
+            attempts[0].StatusCode,
+            new[] { HttpStatusCode.NoContent, HttpStatusCode.Conflict });
+        Assert.Contains(
+            attempts[1].StatusCode,
+            new[] { HttpStatusCode.NoContent, HttpStatusCode.BadRequest });
+        await using var scope = factory.Services.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider
+            .GetRequiredService<FeatureLabDbContext>();
+        var invitation = await dbContext.TenantInvitations.SingleAsync(
+            invitation => invitation.Id == issued.Id);
+        var memberships = await dbContext.TenantMemberships
+            .Where(membership => membership.UserId == recipient.UserId
+                && membership.TenantId == tenantId)
+            .ToArrayAsync();
+        Assert.NotNull(invitation.ClosedAt);
+        Assert.Equal(2, invitation.Version);
+        if (invitation.AcceptedAt is null)
+        {
+            Assert.Equal(HttpStatusCode.NoContent, attempts[0].StatusCode);
+            Assert.Equal(HttpStatusCode.BadRequest, attempts[1].StatusCode);
+            Assert.Empty(memberships);
+        }
+        else
+        {
+            Assert.Equal(HttpStatusCode.NoContent, attempts[1].StatusCode);
+            Assert.Equal(recipient.UserId, invitation.AcceptedByUserId);
+            Assert.Single(memberships);
+        }
+    }
+
+    [Fact]
+    public async Task Stale_terminal_write_is_rejected_by_invitation_version()
+    {
+        var tenantId = Guid.NewGuid();
+        using var owner = await RegisterMemberAsync(
+            tenantId,
+            TenantMembershipRole.Owner);
+        using var recipient = await RegisterUnscopedAsync();
+        var issue = await owner.Client.PostAsJsonAsync(
+            "/api/tenant-invitations",
+            new { email = recipient.Email });
+        var issued = await issue.Content
+            .ReadFromJsonAsync<IssueInvitationResponse>();
+        Assert.NotNull(issued);
+        await using var cancelScope = factory.Services.CreateAsyncScope();
+        await using var acceptScope = factory.Services.CreateAsyncScope();
+        var cancelDbContext = cancelScope.ServiceProvider
+            .GetRequiredService<FeatureLabDbContext>();
+        var acceptDbContext = acceptScope.ServiceProvider
+            .GetRequiredService<FeatureLabDbContext>();
+        var cancelCopy = await cancelDbContext.TenantInvitations.SingleAsync(
+            invitation => invitation.Id == issued.Id);
+        var acceptCopy = await acceptDbContext.TenantInvitations.SingleAsync(
+            invitation => invitation.Id == issued.Id);
+        var now = DateTimeOffset.UtcNow;
+
+        cancelCopy.Close(now);
+        await cancelDbContext.SaveChangesAsync();
+        acceptCopy.Accept(recipient.UserId, now.AddMilliseconds(1));
+
+        await Assert.ThrowsAsync<DbUpdateConcurrencyException>(
+            () => acceptDbContext.SaveChangesAsync());
+        await using var verificationScope =
+            factory.Services.CreateAsyncScope();
+        var verificationDbContext = verificationScope.ServiceProvider
+            .GetRequiredService<FeatureLabDbContext>();
+        var stored = await verificationDbContext.TenantInvitations
+            .SingleAsync(invitation => invitation.Id == issued.Id);
+        Assert.NotNull(stored.ClosedAt);
+        Assert.Null(stored.AcceptedAt);
+        Assert.Null(stored.AcceptedByUserId);
+        Assert.Equal(2, stored.Version);
+    }
+
     private async Task<RegisteredMember> RegisterMemberAsync(
         Guid tenantId,
         TenantMembershipRole role)
@@ -556,6 +969,7 @@ public sealed class TenantInvitationIssuanceTests(
     }
 
     private sealed record IssueInvitationResponse(
+        Guid Id,
         string Code,
         DateTimeOffset ExpiresAt);
 }

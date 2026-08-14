@@ -11,6 +11,7 @@ using Microsoft.EntityFrameworkCore;
 namespace FeatureLab.Tenancy;
 
 public sealed record IssuedTenantInvitation(
+    Guid Id,
     string Code,
     Guid TenantId,
     DateTimeOffset ExpiresAt);
@@ -26,8 +27,20 @@ public enum IssueTenantInvitationStatus
 
 public sealed record IssueTenantInvitationResult(
     IssueTenantInvitationStatus Status,
+    Guid? Id = null,
     string? Code = null,
     DateTimeOffset? ExpiresAt = null);
+
+public enum CancelTenantInvitationStatus
+{
+    Canceled,
+    Unavailable,
+    StaleOwner,
+    Conflict,
+}
+
+public sealed record CancelTenantInvitationResult(
+    CancelTenantInvitationStatus Status);
 
 public interface ITenantInvitationStore
 {
@@ -43,6 +56,14 @@ public interface ITenantInvitationStore
         long membershipVersion,
         Guid tenantId,
         string email,
+        CancellationToken cancellationToken = default);
+
+    Task<CancelTenantInvitationResult> CancelForOwnerAsync(
+        string userId,
+        string securityStamp,
+        long membershipVersion,
+        Guid tenantId,
+        Guid invitationId,
         CancellationToken cancellationToken = default);
 
     Task<bool> AcceptAsync(
@@ -103,6 +124,7 @@ public sealed class EfTenantInvitationStore(
         await dbContext.SaveChangesAsync(cancellationToken);
 
         return new IssuedTenantInvitation(
+            invitation.Id,
             code,
             invitation.TenantId,
             invitation.ExpiresAt);
@@ -136,20 +158,12 @@ public sealed class EfTenantInvitationStore(
                 await dbContext.Database.BeginTransactionAsync(
                     IsolationLevel.Serializable,
                     cancellationToken);
-            var isCurrentOwner = await (
-                    from membership in dbContext.TenantMemberships
-                        .AsNoTracking()
-                    join user in dbContext.Users.AsNoTracking()
-                        on membership.UserId equals user.Id
-                    where membership.UserId == userId
-                        && membership.TenantId == tenantId
-                        && membership.IsActive
-                        && membership.Role == TenantMembershipRole.Owner
-                        && membership.Version == membershipVersion
-                        && user.TenantId == tenantId
-                        && user.SecurityStamp == securityStamp
-                    select membership)
-                .AnyAsync(cancellationToken);
+            var isCurrentOwner = await IsCurrentOwnerAsync(
+                userId,
+                securityStamp,
+                membershipVersion,
+                tenantId,
+                cancellationToken);
             if (!isCurrentOwner)
             {
                 return new(IssueTenantInvitationStatus.StaleOwner);
@@ -204,6 +218,7 @@ public sealed class EfTenantInvitationStore(
 
             return new(
                 IssueTenantInvitationStatus.Issued,
+                invitation.Id,
                 code,
                 invitation.ExpiresAt);
         }
@@ -220,6 +235,77 @@ public sealed class EfTenantInvitationStore(
             when (exception.SqliteErrorCode is 5 or 6 or 19)
         {
             return new(IssueTenantInvitationStatus.Conflict);
+        }
+    }
+
+    public async Task<CancelTenantInvitationResult> CancelForOwnerAsync(
+        string userId,
+        string securityStamp,
+        long membershipVersion,
+        Guid tenantId,
+        Guid invitationId,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(userId)
+            || string.IsNullOrWhiteSpace(securityStamp)
+            || membershipVersion <= 0
+            || tenantId == Guid.Empty)
+        {
+            return new(CancelTenantInvitationStatus.StaleOwner);
+        }
+
+        if (invitationId == Guid.Empty)
+        {
+            return new(CancelTenantInvitationStatus.Unavailable);
+        }
+
+        try
+        {
+            await using var transaction =
+                await dbContext.Database.BeginTransactionAsync(
+                    IsolationLevel.Serializable,
+                    cancellationToken);
+            var isCurrentOwner = await IsCurrentOwnerAsync(
+                userId,
+                securityStamp,
+                membershipVersion,
+                tenantId,
+                cancellationToken);
+            if (!isCurrentOwner)
+            {
+                return new(CancelTenantInvitationStatus.StaleOwner);
+            }
+
+            var invitation = await dbContext.TenantInvitations
+                .SingleOrDefaultAsync(
+                    invitation => invitation.Id == invitationId
+                        && invitation.TenantId == tenantId
+                        && invitation.ClosedAt == null,
+                    cancellationToken);
+            if (invitation is null)
+            {
+                return new(CancelTenantInvitationStatus.Unavailable);
+            }
+
+            invitation.Close(timeProvider.GetUtcNow());
+            await dbContext.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+
+            return new(CancelTenantInvitationStatus.Canceled);
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            return new(CancelTenantInvitationStatus.Unavailable);
+        }
+        catch (DbUpdateException exception)
+            when (IsSqliteBusyOrLocked(exception))
+        {
+            return new(CancelTenantInvitationStatus.Conflict);
+        }
+        catch (SqliteException exception)
+            when (exception.SqliteErrorCode is 5 or 6)
+        {
+            return new(CancelTenantInvitationStatus.Conflict);
         }
     }
 
@@ -324,6 +410,11 @@ public sealed class EfTenantInvitationStore(
         {
             return false;
         }
+        catch (SqliteException exception)
+            when (exception.SqliteErrorCode is 5 or 6)
+        {
+            return false;
+        }
     }
 
     private static string Hash(string code) =>
@@ -351,6 +442,25 @@ public sealed class EfTenantInvitationStore(
             : normalized;
     }
 
+    private Task<bool> IsCurrentOwnerAsync(
+        string userId,
+        string securityStamp,
+        long membershipVersion,
+        Guid tenantId,
+        CancellationToken cancellationToken) =>
+        (from membership in dbContext.TenantMemberships.AsNoTracking()
+         join user in dbContext.Users.AsNoTracking()
+             on membership.UserId equals user.Id
+         where membership.UserId == userId
+             && membership.TenantId == tenantId
+             && membership.IsActive
+             && membership.Role == TenantMembershipRole.Owner
+             && membership.Version == membershipVersion
+             && user.TenantId == tenantId
+             && user.SecurityStamp == securityStamp
+         select membership)
+        .AnyAsync(cancellationToken);
+
     private static bool IsInvitationConflict(
         DbUpdateException exception) =>
         exception.InnerException is SqliteException
@@ -363,6 +473,13 @@ public sealed class EfTenantInvitationStore(
         && sqliteException.Message.Contains(
             "TenantInvitations.NormalizedEmail",
             StringComparison.Ordinal);
+
+    private static bool IsSqliteBusyOrLocked(
+        DbUpdateException exception) =>
+        exception.InnerException is SqliteException
+        {
+            SqliteErrorCode: 5 or 6,
+        };
 
     private static bool IsConcurrentMembershipInsert(
         DbUpdateException exception) =>

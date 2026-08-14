@@ -141,6 +141,14 @@
       "playlist": "Multi-tenancy",
       "checkpoint": "episode/15-tenant-invitation-issuance",
       "status": "release"
+    },
+    {
+      "number": 16,
+      "slug": "tenant-invitation-cancellation",
+      "title": "Cancel an Invitation Without Exposing Its Code",
+      "playlist": "Multi-tenancy",
+      "checkpoint": "episode/16-tenant-invitation-cancellation",
+      "status": "release"
     }
   ]
 }
