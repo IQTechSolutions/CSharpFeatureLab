@@ -107,7 +107,7 @@ app.UseAuthorization();
 app.MapGet("/api/about", () => Results.Ok(new
 {
     application = "C# Feature Lab",
-    lesson = "Owner-controlled invitation cancellation",
+    lesson = "Owner-only pending invitation listing",
 }));
 app.MapGroup("/account").MapIdentityApi<FeatureLabUser>();
 app.MapTenantInvitationEndpoints();

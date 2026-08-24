@@ -16,6 +16,11 @@ public sealed record IssuedTenantInvitation(
     Guid TenantId,
     DateTimeOffset ExpiresAt);
 
+public sealed record PendingTenantInvitation(
+    Guid Id,
+    string Email,
+    DateTimeOffset ExpiresAt);
+
 public enum IssueTenantInvitationStatus
 {
     Issued,
@@ -56,6 +61,13 @@ public interface ITenantInvitationStore
         long membershipVersion,
         Guid tenantId,
         string email,
+        CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<PendingTenantInvitation>?> ListPendingForOwnerAsync(
+        string userId,
+        string securityStamp,
+        long membershipVersion,
+        Guid tenantId,
         CancellationToken cancellationToken = default);
 
     Task<CancelTenantInvitationResult> CancelForOwnerAsync(
@@ -307,6 +319,61 @@ public sealed class EfTenantInvitationStore(
         {
             return new(CancelTenantInvitationStatus.Conflict);
         }
+    }
+
+    public async Task<IReadOnlyList<PendingTenantInvitation>?>
+        ListPendingForOwnerAsync(
+            string userId,
+            string securityStamp,
+            long membershipVersion,
+            Guid tenantId,
+            CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(userId)
+            || string.IsNullOrWhiteSpace(securityStamp)
+            || membershipVersion <= 0
+            || tenantId == Guid.Empty)
+        {
+            return null;
+        }
+
+        await using var transaction =
+            await dbContext.Database.BeginTransactionAsync(
+                IsolationLevel.Serializable,
+                cancellationToken);
+        var isCurrentOwner = await IsCurrentOwnerAsync(
+            userId,
+            securityStamp,
+            membershipVersion,
+            tenantId,
+            cancellationToken);
+        if (!isCurrentOwner)
+        {
+            return null;
+        }
+
+        // Tenant scope and the safe response shape stay in SQL. SQLite cannot
+        // reliably order DateTimeOffset values, so only the already-safe
+        // projection is filtered and ordered in memory.
+        var openInvitations = await dbContext.TenantInvitations
+            .AsNoTracking()
+            .Where(invitation => invitation.TenantId == tenantId
+                && invitation.ClosedAt == null)
+            .Select(invitation => new PendingTenantInvitation(
+                invitation.Id,
+                invitation.NormalizedEmail,
+                invitation.ExpiresAt))
+            .ToListAsync(cancellationToken);
+        var now = timeProvider.GetUtcNow();
+        var pendingInvitations = openInvitations
+            .Where(invitation => invitation.ExpiresAt > now)
+            .OrderBy(invitation => invitation.ExpiresAt)
+            .ThenBy(invitation => invitation.Email, StringComparer.Ordinal)
+            .ThenBy(invitation => invitation.Id)
+            .ToArray();
+
+        await transaction.CommitAsync(cancellationToken);
+        return pendingInvitations;
     }
 
     public async Task<bool> AcceptAsync(

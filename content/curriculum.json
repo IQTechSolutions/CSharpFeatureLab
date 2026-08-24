@@ -149,6 +149,14 @@
       "playlist": "Multi-tenancy",
       "checkpoint": "episode/16-tenant-invitation-cancellation",
       "status": "release"
+    },
+    {
+      "number": 17,
+      "slug": "tenant-pending-invitations",
+      "title": "List Pending Invitations Without Leaking Tenant Data",
+      "playlist": "Multi-tenancy",
+      "checkpoint": "episode/17-tenant-pending-invitations",
+      "status": "release"
     }
   ]
 }

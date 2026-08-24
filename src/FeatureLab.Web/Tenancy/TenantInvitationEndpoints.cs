@@ -9,6 +9,54 @@ public static class TenantInvitationEndpoints
     public static IEndpointRouteBuilder MapTenantInvitationEndpoints(
         this IEndpointRouteBuilder endpoints)
     {
+        endpoints.MapGet(
+                "/api/tenant-invitations",
+                async (
+                    ClaimsPrincipal principal,
+                    HttpContext httpContext,
+                    ITenantContext tenant,
+                    ITenantInvitationStore invitations,
+                    IOptions<IdentityOptions> identityOptions,
+                    CancellationToken cancellationToken) =>
+                {
+                    var userId = principal.FindFirstValue(
+                        ClaimTypes.NameIdentifier);
+                    if (string.IsNullOrWhiteSpace(userId))
+                    {
+                        return Results.Unauthorized();
+                    }
+
+                    var securityStamps = principal.FindAll(
+                            identityOptions.Value.ClaimsIdentity
+                                .SecurityStampClaimType)
+                        .Select(claim => claim.Value)
+                        .ToArray();
+                    if (securityStamps.Length != 1
+                        || string.IsNullOrWhiteSpace(securityStamps[0])
+                        || !TenantMembership.TryGetVersion(
+                            principal,
+                            out var membershipVersion))
+                    {
+                        return Results.Forbid();
+                    }
+
+                    var pending =
+                        await invitations.ListPendingForOwnerAsync(
+                            userId,
+                            securityStamps[0],
+                            membershipVersion,
+                            tenant.Id,
+                            cancellationToken);
+                    if (pending is null)
+                    {
+                        return Results.Forbid();
+                    }
+
+                    httpContext.Response.Headers.CacheControl = "no-store";
+                    return Results.Ok(pending);
+                })
+            .RequireAuthorization(TenantMembership.OwnerPolicy);
+
         endpoints.MapPost(
                 "/api/tenant-invitations",
                 async (
