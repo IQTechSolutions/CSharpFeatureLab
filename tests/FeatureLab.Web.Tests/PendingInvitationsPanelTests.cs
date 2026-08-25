@@ -151,6 +151,30 @@ public sealed class PendingInvitationsPanelTests : BunitContext
         });
     }
 
+    [Fact]
+    public async Task Failed_manual_refresh_keeps_the_snapshot_and_labels_it_stale()
+    {
+        var api = new StubTenantInvitationApi();
+        api.EnqueueList(Loaded(Guid.NewGuid(), "EXISTING@EXAMPLE.TEST"));
+        api.EnqueueList(new LoadPendingInvitationsResult.FailureResult());
+        Services.AddSingleton<ITenantInvitationApi>(api);
+        var panel = Render<PendingInvitationsPanel>();
+        panel.WaitForAssertion(() =>
+            Assert.Contains("EXISTING@EXAMPLE.TEST", panel.Markup));
+
+        await FindButton(panel, "Refresh").ClickAsync(new MouseEventArgs());
+
+        panel.WaitForAssertion(() =>
+        {
+            Assert.Equal(2, api.ListCallCount);
+            Assert.Contains("EXISTING@EXAMPLE.TEST", panel.Markup);
+            Assert.Contains(
+                "may be out of date",
+                panel.Find("[role=alert]").TextContent,
+                StringComparison.OrdinalIgnoreCase);
+        });
+    }
+
     [Theory]
     [InlineData(true, "sign in")]
     [InlineData(false, "owner")]

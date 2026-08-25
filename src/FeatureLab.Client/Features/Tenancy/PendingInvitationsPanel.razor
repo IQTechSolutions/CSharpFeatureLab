@@ -86,7 +86,9 @@
         LoadAsync();
 
     private Task RefreshAsync() =>
-        LoadAsync();
+        LoadAsync(
+            refreshFailureMessage:
+                "The latest list could not be loaded. The displayed invitations may be out of date.");
 
     private async Task LoadAsync(
         string? successMessage = null,
