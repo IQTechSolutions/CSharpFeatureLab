@@ -1,0 +1,191 @@
+@page "/workspace/invitations"
+@using System.Globalization
+@inject ITenantInvitationApi InvitationApi
+
+<PageTitle>Pending invitations</PageTitle>
+
+<section class="work-item-card invitation-panel" aria-busy="@_isBusy">
+    <div class="panel-heading">
+        <div>
+            <p class="eyebrow">Workspace owner</p>
+            <h1>Pending invitations</h1>
+        </div>
+        <button class="secondary-button"
+                type="button"
+                disabled="@_isBusy"
+                @onclick="RefreshAsync">
+            Refresh invitations
+        </button>
+    </div>
+
+    <p class="intro">
+        The server chooses the workspace and returns only the management fields this panel needs.
+    </p>
+
+    @if (_isLoading)
+    {
+        <p class="loading-state" role="status">Loading pending invitations…</p>
+    }
+
+    @if (_successMessage is not null)
+    {
+        <p class="success" role="status">@_successMessage</p>
+    }
+
+    @if (_errorMessage is not null)
+    {
+        <p class="error-summary" role="alert">@_errorMessage</p>
+    }
+
+    @if (!_isLoading && _invitations is { Count: 0 })
+    {
+        <p class="empty-state" data-testid="empty-state">
+            No open invitations are waiting in this workspace.
+        </p>
+    }
+    else if (_invitations is { Count: > 0 })
+    {
+        <ul class="invitation-list" aria-label="Pending invitations">
+            @foreach (var invitation in _invitations)
+            {
+                <li class="invitation-row" @key="invitation.Id">
+                    <div>
+                        <strong>@invitation.Email</strong>
+                        <span>
+                            Expires
+                            <time datetime="@MachineExpiry(invitation.ExpiresAt)">
+                                @DisplayExpiry(invitation.ExpiresAt)
+                            </time>
+                        </span>
+                    </div>
+                    <button class="danger-button"
+                            type="button"
+                            aria-label="Cancel invitation for @invitation.Email"
+                            disabled="@_isBusy"
+                            @onclick="() => CancelAsync(invitation.Id)">
+                        @(_cancellingId == invitation.Id
+                            ? "Cancelling…"
+                            : "Cancel invitation")
+                    </button>
+                </li>
+            }
+        </ul>
+    }
+</section>
+
+@code {
+    private IReadOnlyList<PendingInvitationSummary>? _invitations;
+    private Guid? _cancellingId;
+    private bool _isLoading;
+    private string? _successMessage;
+    private string? _errorMessage;
+
+    private bool _isBusy => _isLoading || _cancellingId is not null;
+
+    protected override Task OnInitializedAsync() =>
+        LoadAsync();
+
+    private Task RefreshAsync() =>
+        LoadAsync();
+
+    private async Task LoadAsync(
+        string? successMessage = null,
+        string? refreshFailureMessage = null,
+        string? loadedWarningMessage = null)
+    {
+        _isLoading = true;
+        _successMessage = null;
+        _errorMessage = null;
+
+        try
+        {
+            var result = await InvitationApi.ListPendingAsync();
+            if (result is LoadPendingInvitationsResult.LoadedResult loaded)
+            {
+                _invitations = loaded.Invitations;
+                _successMessage = successMessage;
+                _errorMessage = loadedWarningMessage;
+            }
+            else if (result is LoadPendingInvitationsResult.UnauthorizedResult)
+            {
+                _invitations = null;
+                _errorMessage = "Sign in before managing invitations.";
+            }
+            else if (result is LoadPendingInvitationsResult.ForbiddenResult)
+            {
+                _invitations = null;
+                _errorMessage =
+                    "Only a current workspace owner can manage invitations.";
+            }
+            else
+            {
+                _errorMessage =
+                    refreshFailureMessage
+                    ?? "We could not load the invitation list. Try again.";
+            }
+        }
+        finally
+        {
+            _isLoading = false;
+        }
+    }
+
+    private async Task CancelAsync(Guid invitationId)
+    {
+        if (_isBusy)
+        {
+            return;
+        }
+
+        _cancellingId = invitationId;
+        _successMessage = null;
+        _errorMessage = null;
+
+        try
+        {
+            var result = await InvitationApi.CancelAsync(invitationId);
+            if (result is CancelPendingInvitationResult.NoLongerPendingResult)
+            {
+                await LoadAsync(
+                    "No pending invitation remains. The list was refreshed.",
+                    "The action completed, but the list could not be refreshed.");
+            }
+            else if (result is CancelPendingInvitationResult.UnauthorizedResult)
+            {
+                _invitations = null;
+                _errorMessage = "Sign in before managing invitations.";
+            }
+            else if (result is CancelPendingInvitationResult.ForbiddenResult)
+            {
+                _invitations = null;
+                _errorMessage =
+                    "Only a current workspace owner can manage invitations.";
+            }
+            else if (result is CancelPendingInvitationResult.ConflictResult)
+            {
+                await LoadAsync(
+                    refreshFailureMessage:
+                        "The invitation could not be updated, and the latest list could not be loaded.",
+                    loadedWarningMessage:
+                        "The invitation could not be updated. The latest list is shown.");
+            }
+            else
+            {
+                _errorMessage =
+                    "We could not update the invitation. The list may be out of date.";
+            }
+        }
+        finally
+        {
+            _cancellingId = null;
+        }
+    }
+
+    private static string MachineExpiry(DateTimeOffset expiresAt) =>
+        expiresAt.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+
+    private static string DisplayExpiry(DateTimeOffset expiresAt) =>
+        expiresAt.ToUniversalTime().ToString(
+            "dd MMM yyyy, HH:mm 'UTC'",
+            CultureInfo.InvariantCulture);
+}

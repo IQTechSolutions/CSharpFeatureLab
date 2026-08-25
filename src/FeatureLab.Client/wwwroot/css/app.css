@@ -154,6 +154,82 @@ button:disabled {
     color: #146c3b;
 }
 
+.invitation-panel {
+    width: min(100%, 58rem);
+}
+
+.panel-heading {
+    display: flex;
+    align-items: start;
+    justify-content: space-between;
+    gap: 1.5rem;
+}
+
+.panel-heading .secondary-button {
+    flex: 0 0 auto;
+    margin-top: 0;
+    border: 2px solid #2358b1;
+    background: #fff;
+    color: #2358b1;
+}
+
+.panel-heading .secondary-button:hover {
+    background: #edf4ff;
+}
+
+.loading-state,
+.empty-state {
+    margin: 1rem 0 0;
+    padding: 1rem;
+    border-radius: 0.75rem;
+    background: #f3f6fb;
+    color: #526078;
+}
+
+.invitation-list {
+    display: grid;
+    gap: 0.85rem;
+    margin: 1.5rem 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+.invitation-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 1rem;
+    border: 1px solid #d4ddeb;
+    border-radius: 0.85rem;
+    background: #fff;
+}
+
+.invitation-row div {
+    display: grid;
+    gap: 0.35rem;
+    min-width: 0;
+}
+
+.invitation-row strong {
+    overflow-wrap: anywhere;
+}
+
+.invitation-row span {
+    color: #526078;
+    font-size: 0.94rem;
+}
+
+.invitation-row .danger-button {
+    flex: 0 0 auto;
+    margin-top: 0;
+    background: #a82a21;
+}
+
+.invitation-row .danger-button:hover {
+    background: #841d17;
+}
+
 @media (max-width: 40rem) {
     #app {
         align-items: start;
@@ -164,5 +240,11 @@ button:disabled {
         margin-top: 1rem;
         padding: 1.5rem;
         border-radius: 1rem;
+    }
+
+    .panel-heading,
+    .invitation-row {
+        align-items: stretch;
+        flex-direction: column;
     }
 }

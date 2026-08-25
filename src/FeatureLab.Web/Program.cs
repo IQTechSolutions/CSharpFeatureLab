@@ -107,7 +107,7 @@ app.UseAuthorization();
 app.MapGet("/api/about", () => Results.Ok(new
 {
     application = "C# Feature Lab",
-    lesson = "Owner-only pending invitation listing",
+    lesson = "Blazor invitation management with authoritative refresh",
 }));
 app.MapGroup("/account").MapIdentityApi<FeatureLabUser>();
 app.MapTenantInvitationEndpoints();

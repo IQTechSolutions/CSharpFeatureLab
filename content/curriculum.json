@@ -157,6 +157,14 @@
       "playlist": "Multi-tenancy",
       "checkpoint": "episode/17-tenant-pending-invitations",
       "status": "release"
+    },
+    {
+      "number": 18,
+      "slug": "blazor-invitation-panel",
+      "title": "Build a Blazor Invitation Panel That Refreshes Safely",
+      "playlist": "Blazor",
+      "checkpoint": "episode/18-blazor-invitation-panel",
+      "status": "release"
     }
   ]
 }
