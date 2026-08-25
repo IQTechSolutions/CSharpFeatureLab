@@ -11,13 +11,14 @@ public sealed class HttpTenantInvitationApiTests
     {
         var invitationId = Guid.Parse(
             "1465d09d-1430-4a7c-bc7b-205f7396f128");
+        var recipient = Recipient("owner-candidate");
         var handler = new RecordingHttpMessageHandler(
             HttpStatusCode.OK,
             $$"""
             [
               {
                 "id": "{{invitationId}}",
-                "email": "OWNER-CANDIDATE@EXAMPLE.TEST",
+                "email": "{{recipient}}",
                 "expiresAt": "2026-08-26T16:30:00+00:00"
               }
             ]
@@ -30,7 +31,7 @@ public sealed class HttpTenantInvitationApiTests
             LoadPendingInvitationsResult.LoadedResult>(result);
         var invitation = Assert.Single(loaded.Invitations);
         Assert.Equal(invitationId, invitation.Id);
-        Assert.Equal("OWNER-CANDIDATE@EXAMPLE.TEST", invitation.Email);
+        Assert.Equal(recipient, invitation.Email);
         Assert.Equal(
             DateTimeOffset.Parse("2026-08-26T16:30:00+00:00"),
             invitation.ExpiresAt);
@@ -170,6 +171,9 @@ public sealed class HttpTenantInvitationApiTests
                 Uri.UriSchemeHttps,
                 "feature-lab.example").Uri,
         };
+
+    private static string Recipient(string localPart) =>
+        $"{localPart}@example.test";
 
     private sealed class RecordingHttpMessageHandler(
         HttpStatusCode statusCode,

@@ -36,13 +36,14 @@ public sealed class PendingInvitationsPanelTests : BunitContext
             30,
             0,
             TimeSpan.Zero);
+        var recipient = Recipient("owner-candidate");
         var api = new StubTenantInvitationApi();
         api.EnqueueList(
             new LoadPendingInvitationsResult.LoadedResult(
             [
                 new PendingInvitationSummary(
                     invitationId,
-                    "OWNER-CANDIDATE@EXAMPLE.TEST",
+                    recipient,
                     expiresAt),
             ]));
         Services.AddSingleton<ITenantInvitationApi>(api);
@@ -52,7 +53,7 @@ public sealed class PendingInvitationsPanelTests : BunitContext
         panel.WaitForAssertion(() =>
         {
             Assert.Contains(
-                "OWNER-CANDIDATE@EXAMPLE.TEST",
+                recipient,
                 panel.Markup,
                 StringComparison.Ordinal);
             Assert.DoesNotContain(
@@ -94,7 +95,7 @@ public sealed class PendingInvitationsPanelTests : BunitContext
         var invitationId = Guid.Parse(
             "3c73eb25-2284-49c7-82f1-862f9478a3d2");
         var api = new StubTenantInvitationApi();
-        api.EnqueueList(Loaded(invitationId, "PENDING@EXAMPLE.TEST"));
+        api.EnqueueList(Loaded(invitationId, Recipient("pending")));
         api.EnqueueList(new LoadPendingInvitationsResult.LoadedResult([]));
         var cancellation = new TaskCompletionSource<CancelPendingInvitationResult>(
             TaskCreationOptions.RunContinuationsAsynchronously);
@@ -102,7 +103,7 @@ public sealed class PendingInvitationsPanelTests : BunitContext
         Services.AddSingleton<ITenantInvitationApi>(api);
         var panel = Render<PendingInvitationsPanel>();
         panel.WaitForAssertion(() =>
-            Assert.Contains("PENDING@EXAMPLE.TEST", panel.Markup));
+            Assert.Contains(Recipient("pending"), panel.Markup));
 
         var click = FindCancelButton(panel).ClickAsync(
             new MouseEventArgs());
@@ -121,7 +122,7 @@ public sealed class PendingInvitationsPanelTests : BunitContext
         panel.WaitForAssertion(() =>
         {
             Assert.Equal(2, api.ListCallCount);
-            Assert.DoesNotContain("PENDING@EXAMPLE.TEST", panel.Markup);
+            Assert.DoesNotContain(Recipient("pending"), panel.Markup);
             Assert.Contains(
                 "No pending invitation remains. The list was refreshed.",
                 panel.Markup,
@@ -133,12 +134,12 @@ public sealed class PendingInvitationsPanelTests : BunitContext
     public async Task Manual_refresh_replaces_the_whole_server_snapshot()
     {
         var api = new StubTenantInvitationApi();
-        api.EnqueueList(Loaded(Guid.NewGuid(), "FIRST@EXAMPLE.TEST"));
-        api.EnqueueList(Loaded(Guid.NewGuid(), "SECOND@EXAMPLE.TEST"));
+        api.EnqueueList(Loaded(Guid.NewGuid(), Recipient("first")));
+        api.EnqueueList(Loaded(Guid.NewGuid(), Recipient("second")));
         Services.AddSingleton<ITenantInvitationApi>(api);
         var panel = Render<PendingInvitationsPanel>();
         panel.WaitForAssertion(() =>
-            Assert.Contains("FIRST@EXAMPLE.TEST", panel.Markup));
+            Assert.Contains(Recipient("first"), panel.Markup));
 
         await FindButton(panel, "Refresh").ClickAsync(
             new MouseEventArgs());
@@ -146,8 +147,8 @@ public sealed class PendingInvitationsPanelTests : BunitContext
         panel.WaitForAssertion(() =>
         {
             Assert.Equal(2, api.ListCallCount);
-            Assert.DoesNotContain("FIRST@EXAMPLE.TEST", panel.Markup);
-            Assert.Contains("SECOND@EXAMPLE.TEST", panel.Markup);
+            Assert.DoesNotContain(Recipient("first"), panel.Markup);
+            Assert.Contains(Recipient("second"), panel.Markup);
         });
     }
 
@@ -155,19 +156,19 @@ public sealed class PendingInvitationsPanelTests : BunitContext
     public async Task Failed_manual_refresh_keeps_the_snapshot_and_labels_it_stale()
     {
         var api = new StubTenantInvitationApi();
-        api.EnqueueList(Loaded(Guid.NewGuid(), "EXISTING@EXAMPLE.TEST"));
+        api.EnqueueList(Loaded(Guid.NewGuid(), Recipient("existing")));
         api.EnqueueList(new LoadPendingInvitationsResult.FailureResult());
         Services.AddSingleton<ITenantInvitationApi>(api);
         var panel = Render<PendingInvitationsPanel>();
         panel.WaitForAssertion(() =>
-            Assert.Contains("EXISTING@EXAMPLE.TEST", panel.Markup));
+            Assert.Contains(Recipient("existing"), panel.Markup));
 
         await FindButton(panel, "Refresh").ClickAsync(new MouseEventArgs());
 
         panel.WaitForAssertion(() =>
         {
             Assert.Equal(2, api.ListCallCount);
-            Assert.Contains("EXISTING@EXAMPLE.TEST", panel.Markup);
+            Assert.Contains(Recipient("existing"), panel.Markup);
             Assert.Contains(
                 "may be out of date",
                 panel.Find("[role=alert]").TextContent,
@@ -226,19 +227,19 @@ public sealed class PendingInvitationsPanelTests : BunitContext
     {
         var invitationId = Guid.NewGuid();
         var api = new StubTenantInvitationApi();
-        api.EnqueueList(Loaded(invitationId, "STILL-PENDING@EXAMPLE.TEST"));
+        api.EnqueueList(Loaded(invitationId, Recipient("still-pending")));
         api.EnqueueCancel(new CancelPendingInvitationResult.FailureResult());
         Services.AddSingleton<ITenantInvitationApi>(api);
         var panel = Render<PendingInvitationsPanel>();
         panel.WaitForAssertion(() =>
-            Assert.Contains("STILL-PENDING@EXAMPLE.TEST", panel.Markup));
+            Assert.Contains(Recipient("still-pending"), panel.Markup));
 
         await FindCancelButton(panel).ClickAsync(
             new MouseEventArgs());
 
         panel.WaitForAssertion(() =>
         {
-            Assert.Contains("STILL-PENDING@EXAMPLE.TEST", panel.Markup);
+            Assert.Contains(Recipient("still-pending"), panel.Markup);
             Assert.Contains(
                 "could not",
                 panel.Find("[role=alert]").TextContent,
@@ -256,7 +257,7 @@ public sealed class PendingInvitationsPanelTests : BunitContext
         string expectedText)
     {
         var api = new StubTenantInvitationApi();
-        api.EnqueueList(Loaded(Guid.NewGuid(), "PRIVATE@EXAMPLE.TEST"));
+        api.EnqueueList(Loaded(Guid.NewGuid(), Recipient("private")));
         api.EnqueueCancel(
             isUnauthorized
                 ? new CancelPendingInvitationResult.UnauthorizedResult()
@@ -264,13 +265,13 @@ public sealed class PendingInvitationsPanelTests : BunitContext
         Services.AddSingleton<ITenantInvitationApi>(api);
         var panel = Render<PendingInvitationsPanel>();
         panel.WaitForAssertion(() =>
-            Assert.Contains("PRIVATE@EXAMPLE.TEST", panel.Markup));
+            Assert.Contains(Recipient("private"), panel.Markup));
 
         await FindCancelButton(panel).ClickAsync(new MouseEventArgs());
 
         panel.WaitForAssertion(() =>
         {
-            Assert.DoesNotContain("PRIVATE@EXAMPLE.TEST", panel.Markup);
+            Assert.DoesNotContain(Recipient("private"), panel.Markup);
             Assert.Contains(
                 expectedText,
                 panel.Find("[role=alert]").TextContent,
@@ -283,20 +284,20 @@ public sealed class PendingInvitationsPanelTests : BunitContext
     {
         var invitationId = Guid.NewGuid();
         var api = new StubTenantInvitationApi();
-        api.EnqueueList(Loaded(invitationId, "OLD@EXAMPLE.TEST"));
-        api.EnqueueList(Loaded(invitationId, "OLD@EXAMPLE.TEST"));
+        api.EnqueueList(Loaded(invitationId, Recipient("old")));
+        api.EnqueueList(Loaded(invitationId, Recipient("old")));
         api.EnqueueCancel(new CancelPendingInvitationResult.ConflictResult());
         Services.AddSingleton<ITenantInvitationApi>(api);
         var panel = Render<PendingInvitationsPanel>();
         panel.WaitForAssertion(() =>
-            Assert.Contains("OLD@EXAMPLE.TEST", panel.Markup));
+            Assert.Contains(Recipient("old"), panel.Markup));
 
         await FindCancelButton(panel).ClickAsync(new MouseEventArgs());
 
         panel.WaitForAssertion(() =>
         {
             Assert.Equal(2, api.ListCallCount);
-            Assert.Contains("OLD@EXAMPLE.TEST", panel.Markup);
+            Assert.Contains(Recipient("old"), panel.Markup);
             Assert.Contains(
                 "could not be updated",
                 panel.Find("[role=alert]").TextContent,
@@ -310,14 +311,14 @@ public sealed class PendingInvitationsPanelTests : BunitContext
     {
         var invitationId = Guid.NewGuid();
         var api = new StubTenantInvitationApi();
-        api.EnqueueList(Loaded(invitationId, "STALE@EXAMPLE.TEST"));
+        api.EnqueueList(Loaded(invitationId, Recipient("stale")));
         api.EnqueueList(new LoadPendingInvitationsResult.FailureResult());
         api.EnqueueCancel(
             new CancelPendingInvitationResult.NoLongerPendingResult());
         Services.AddSingleton<ITenantInvitationApi>(api);
         var panel = Render<PendingInvitationsPanel>();
         panel.WaitForAssertion(() =>
-            Assert.Contains("STALE@EXAMPLE.TEST", panel.Markup));
+            Assert.Contains(Recipient("stale"), panel.Markup));
 
         await FindCancelButton(panel).ClickAsync(
             new MouseEventArgs());
@@ -325,7 +326,7 @@ public sealed class PendingInvitationsPanelTests : BunitContext
         panel.WaitForAssertion(() =>
         {
             Assert.Equal(2, api.ListCallCount);
-            Assert.Contains("STALE@EXAMPLE.TEST", panel.Markup);
+            Assert.Contains(Recipient("stale"), panel.Markup);
             Assert.DoesNotContain(
                 "No pending invitation remains. The list was refreshed.",
                 panel.Markup,
@@ -354,6 +355,9 @@ public sealed class PendingInvitationsPanelTests : BunitContext
                     0,
                     TimeSpan.Zero)),
         ]);
+
+    private static string Recipient(string localPart) =>
+        $"{localPart}@example.test";
 
     private static IElement FindButton(
         IRenderedComponent<PendingInvitationsPanel> panel,
