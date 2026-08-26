@@ -22,6 +22,24 @@
         The server chooses the workspace and returns only the management fields this panel needs.
     </p>
 
+    <form class="invitation-form"
+          @onsubmit="IssueAsync"
+          @onsubmit:preventDefault>
+        <div class="field">
+            <label for="recipient-email">Recipient email</label>
+            <input id="recipient-email"
+                   name="recipient-email"
+                   type="email"
+                   autocomplete="email"
+                   required
+                   disabled="@_isBusy"
+                   @bind="_recipientEmail" />
+        </div>
+        <button type="submit" disabled="@_isBusy">
+            @(_isIssuing ? "Issuing…" : "Issue invitation")
+        </button>
+    </form>
+
     @if (_isLoading)
     {
         <p class="loading-state" role="status">Loading pending invitations…</p>
@@ -35,6 +53,32 @@
     @if (_errorMessage is not null)
     {
         <p class="error-summary" role="alert">@_errorMessage</p>
+    }
+
+    @if (_issuedCode is not null && _issuedCodeExpiresAt is not null)
+    {
+        <aside class="one-time-code"
+               data-testid="issued-code"
+               aria-labelledby="issued-code-heading">
+            <h2 id="issued-code-heading">Copy this acceptance code now</h2>
+            <p>
+                This is the only time the code is shown. It is cleared when you refresh,
+                issue another invitation, or leave this page.
+            </p>
+            <label for="acceptance-code">Acceptance code</label>
+            <input id="acceptance-code"
+                   class="acceptance-code"
+                   value="@_issuedCode"
+                   readonly
+                   autocomplete="off"
+                   spellcheck="false" />
+            <p class="code-expiry">
+                Expires
+                <time datetime="@MachineExpiry(_issuedCodeExpiresAt.Value)">
+                    @DisplayExpiry(_issuedCodeExpiresAt.Value)
+                </time>
+            </p>
+        </aside>
     }
 
     @if (!_isLoading && _invitations is { Count: 0 })
@@ -76,19 +120,83 @@
 @code {
     private IReadOnlyList<PendingInvitationSummary>? _invitations;
     private Guid? _cancellingId;
+    private string _recipientEmail = string.Empty;
+    private string? _issuedCode;
+    private DateTimeOffset? _issuedCodeExpiresAt;
+    private bool _isIssuing;
     private bool _isLoading;
     private string? _successMessage;
     private string? _errorMessage;
 
-    private bool _isBusy => _isLoading || _cancellingId is not null;
+    private bool _isBusy =>
+        _isLoading || _isIssuing || _cancellingId is not null;
 
     protected override Task OnInitializedAsync() =>
         LoadAsync();
 
-    private Task RefreshAsync() =>
-        LoadAsync(
+    private Task RefreshAsync()
+    {
+        ClearOneTimeCode();
+        return LoadAsync(
             refreshFailureMessage:
                 "The latest list could not be loaded. The displayed invitations may be out of date.");
+    }
+
+    private async Task IssueAsync()
+    {
+        if (_isBusy)
+        {
+            return;
+        }
+
+        ClearOneTimeCode();
+        _isIssuing = true;
+        _successMessage = null;
+        _errorMessage = null;
+
+        try
+        {
+            var result = await InvitationApi.IssueAsync(_recipientEmail);
+            if (result is IssuePendingInvitationResult.IssuedResult issued)
+            {
+                _recipientEmail = string.Empty;
+                _issuedCode = issued.Code;
+                _issuedCodeExpiresAt = issued.ExpiresAt;
+                await LoadAsync(
+                    "Invitation issued. Copy the acceptance code now.",
+                    "The invitation was issued, but the latest list could not be loaded.");
+            }
+            else if (result is IssuePendingInvitationResult.InvalidRecipientResult)
+            {
+                _errorMessage = "Enter a valid recipient email address.";
+            }
+            else if (result is IssuePendingInvitationResult.UnauthorizedResult)
+            {
+                _invitations = null;
+                _errorMessage = "Sign in before managing invitations.";
+            }
+            else if (result is IssuePendingInvitationResult.ForbiddenResult)
+            {
+                _invitations = null;
+                _errorMessage =
+                    "Only a current workspace owner can manage invitations.";
+            }
+            else if (result is IssuePendingInvitationResult.ConflictResult)
+            {
+                _errorMessage =
+                    "An invitation cannot be issued for this recipient.";
+            }
+            else
+            {
+                _errorMessage =
+                    "We could not issue the invitation. Try again.";
+            }
+        }
+        finally
+        {
+            _isIssuing = false;
+        }
+    }
 
     private async Task LoadAsync(
         string? successMessage = null,
@@ -139,6 +247,7 @@
             return;
         }
 
+        ClearOneTimeCode();
         _cancellingId = invitationId;
         _successMessage = null;
         _errorMessage = null;
@@ -181,6 +290,12 @@
         {
             _cancellingId = null;
         }
+    }
+
+    private void ClearOneTimeCode()
+    {
+        _issuedCode = null;
+        _issuedCodeExpiresAt = null;
     }
 
     private static string MachineExpiry(DateTimeOffset expiresAt) =>

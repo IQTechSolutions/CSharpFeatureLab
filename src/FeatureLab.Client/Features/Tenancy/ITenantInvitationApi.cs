@@ -2,6 +2,10 @@ namespace FeatureLab.Client.Features.Tenancy;
 
 public interface ITenantInvitationApi
 {
+    Task<IssuePendingInvitationResult> IssueAsync(
+        string recipientEmail,
+        CancellationToken cancellationToken = default);
+
     Task<LoadPendingInvitationsResult> ListPendingAsync(
         CancellationToken cancellationToken = default);
 
@@ -14,6 +18,53 @@ public sealed record PendingInvitationSummary(
     Guid Id,
     string Email,
     DateTimeOffset ExpiresAt);
+
+public abstract record IssuePendingInvitationResult
+{
+    private IssuePendingInvitationResult()
+    {
+    }
+
+    public sealed record IssuedResult(
+        string Code,
+        DateTimeOffset ExpiresAt)
+        : IssuePendingInvitationResult;
+
+    public sealed record InvalidRecipientResult
+        : IssuePendingInvitationResult;
+
+    public sealed record UnauthorizedResult
+        : IssuePendingInvitationResult;
+
+    public sealed record ForbiddenResult
+        : IssuePendingInvitationResult;
+
+    public sealed record ConflictResult
+        : IssuePendingInvitationResult;
+
+    public sealed record FailureResult
+        : IssuePendingInvitationResult;
+
+    public static IssuePendingInvitationResult Issued(
+        string code,
+        DateTimeOffset expiresAt) =>
+        new IssuedResult(code, expiresAt);
+
+    public static IssuePendingInvitationResult InvalidRecipient() =>
+        new InvalidRecipientResult();
+
+    public static IssuePendingInvitationResult Unauthorized() =>
+        new UnauthorizedResult();
+
+    public static IssuePendingInvitationResult Forbidden() =>
+        new ForbiddenResult();
+
+    public static IssuePendingInvitationResult Conflict() =>
+        new ConflictResult();
+
+    public static IssuePendingInvitationResult Failure() =>
+        new FailureResult();
+}
 
 public abstract record LoadPendingInvitationsResult
 {

@@ -10,6 +10,83 @@ public sealed class HttpTenantInvitationApi(HttpClient httpClient)
 {
     private const string InvitationsPath = "api/tenant-invitations";
 
+    public async Task<IssuePendingInvitationResult> IssueAsync(
+        string recipientEmail,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(recipientEmail))
+        {
+            return IssuePendingInvitationResult.InvalidRecipient();
+        }
+
+        using var request = CreateRequest(HttpMethod.Post, InvitationsPath);
+        request.Content = JsonContent.Create(
+            new IssueInvitationRequest(recipientEmail.Trim()));
+
+        HttpResponseMessage response;
+        try
+        {
+            response = await httpClient.SendAsync(request, cancellationToken);
+        }
+        catch (HttpRequestException)
+        {
+            return IssuePendingInvitationResult.Failure();
+        }
+
+        using (response)
+        {
+            if (response.StatusCode == HttpStatusCode.BadRequest)
+            {
+                return IssuePendingInvitationResult.InvalidRecipient();
+            }
+
+            if (response.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                return IssuePendingInvitationResult.Unauthorized();
+            }
+
+            if (response.StatusCode == HttpStatusCode.Forbidden)
+            {
+                return IssuePendingInvitationResult.Forbidden();
+            }
+
+            if (response.StatusCode == HttpStatusCode.Conflict)
+            {
+                return IssuePendingInvitationResult.Conflict();
+            }
+
+            if (response.StatusCode != HttpStatusCode.Created)
+            {
+                return IssuePendingInvitationResult.Failure();
+            }
+
+            try
+            {
+                var invitation = await response.Content
+                    .ReadFromJsonAsync<IssuedInvitationResponse>(
+                        cancellationToken);
+                if (invitation is null
+                    || invitation.Id == Guid.Empty
+                    || string.IsNullOrWhiteSpace(invitation.Code)
+                    || invitation.ExpiresAt == default)
+                {
+                    return IssuePendingInvitationResult.Failure();
+                }
+
+                return IssuePendingInvitationResult.Issued(
+                    invitation.Code,
+                    invitation.ExpiresAt);
+            }
+            catch (Exception exception)
+                when (exception is HttpRequestException
+                    or JsonException
+                    or NotSupportedException)
+            {
+                return IssuePendingInvitationResult.Failure();
+            }
+        }
+    }
+
     public async Task<LoadPendingInvitationsResult> ListPendingAsync(
         CancellationToken cancellationToken = default)
     {
@@ -126,5 +203,12 @@ public sealed class HttpTenantInvitationApi(HttpClient httpClient)
     private sealed record PendingInvitationResponse(
         Guid Id,
         string Email,
+        DateTimeOffset ExpiresAt);
+
+    private sealed record IssueInvitationRequest(string Email);
+
+    private sealed record IssuedInvitationResponse(
+        Guid Id,
+        string Code,
         DateTimeOffset ExpiresAt);
 }

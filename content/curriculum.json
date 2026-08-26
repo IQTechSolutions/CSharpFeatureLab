@@ -165,6 +165,14 @@
       "playlist": "Blazor",
       "checkpoint": "episode/18-blazor-invitation-panel",
       "status": "release"
+    },
+    {
+      "number": 19,
+      "slug": "blazor-one-time-invitation-code",
+      "title": "Reveal a Blazor Invitation Code Exactly Once",
+      "playlist": "Blazor",
+      "checkpoint": "episode/19-blazor-one-time-invitation-code",
+      "status": "release"
     }
   ]
 }
