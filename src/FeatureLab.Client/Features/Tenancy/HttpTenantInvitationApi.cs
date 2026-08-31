@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Components.WebAssembly.Http;
 
 namespace FeatureLab.Client.Features.Tenancy;
@@ -55,6 +56,13 @@ public sealed class HttpTenantInvitationApi(HttpClient httpClient)
                 return IssuePendingInvitationResult.Conflict();
             }
 
+            if (response.StatusCode == HttpStatusCode.ServiceUnavailable)
+            {
+                return await ReadDeliveryFailureAsync(
+                    response,
+                    cancellationToken);
+            }
+
             if (response.StatusCode != HttpStatusCode.Created)
             {
                 return IssuePendingInvitationResult.Failure();
@@ -63,18 +71,21 @@ public sealed class HttpTenantInvitationApi(HttpClient httpClient)
             try
             {
                 var invitation = await response.Content
-                    .ReadFromJsonAsync<IssuedInvitationResponse>(
+                    .ReadFromJsonAsync<HandedOffInvitationResponse>(
                         cancellationToken);
                 if (invitation is null
                     || invitation.Id == Guid.Empty
-                    || string.IsNullOrWhiteSpace(invitation.Code)
-                    || invitation.ExpiresAt == default)
+                    || invitation.ExpiresAt == default
+                    || !string.Equals(
+                        invitation.DeliveryStatus,
+                        "handedOff",
+                        StringComparison.Ordinal))
                 {
                     return IssuePendingInvitationResult.Failure();
                 }
 
-                return IssuePendingInvitationResult.Issued(
-                    invitation.Code,
+                return IssuePendingInvitationResult.HandedOff(
+                    invitation.Id,
                     invitation.ExpiresAt);
             }
             catch (Exception exception)
@@ -84,6 +95,36 @@ public sealed class HttpTenantInvitationApi(HttpClient httpClient)
             {
                 return IssuePendingInvitationResult.Failure();
             }
+        }
+    }
+
+    private static async Task<IssuePendingInvitationResult>
+        ReadDeliveryFailureAsync(
+            HttpResponseMessage response,
+            CancellationToken cancellationToken)
+    {
+        try
+        {
+            var problem = await response.Content
+                .ReadFromJsonAsync<InvitationDeliveryProblemResponse>(
+                    cancellationToken);
+
+            return problem?.DeliveryStatus switch
+            {
+                "deliveryFailedCompensated" =>
+                    IssuePendingInvitationResult
+                        .DeliveryFailedCompensated(),
+                "deliveryOutcomeUnknown" =>
+                    IssuePendingInvitationResult.DeliveryOutcomeUnknown(),
+                _ => IssuePendingInvitationResult.Failure(),
+            };
+        }
+        catch (Exception exception)
+            when (exception is HttpRequestException
+                or JsonException
+                or NotSupportedException)
+        {
+            return IssuePendingInvitationResult.Failure();
         }
     }
 
@@ -207,8 +248,12 @@ public sealed class HttpTenantInvitationApi(HttpClient httpClient)
 
     private sealed record IssueInvitationRequest(string Email);
 
-    private sealed record IssuedInvitationResponse(
+    [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
+    private sealed record HandedOffInvitationResponse(
         Guid Id,
-        string Code,
-        DateTimeOffset ExpiresAt);
+        DateTimeOffset ExpiresAt,
+        string DeliveryStatus);
+
+    private sealed record InvitationDeliveryProblemResponse(
+        string? DeliveryStatus);
 }

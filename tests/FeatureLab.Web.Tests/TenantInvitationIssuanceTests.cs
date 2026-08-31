@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
@@ -7,9 +8,13 @@ using System.Text.Json;
 using FeatureLab.Data;
 using FeatureLab.Identity;
 using FeatureLab.Tenancy;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 
 namespace FeatureLab.Web.Tests;
 
@@ -42,14 +47,22 @@ public sealed class TenantInvitationIssuanceTests(
 
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
         Assert.Equal("no-store", response.Headers.CacheControl?.ToString());
-        var json = JsonDocument.Parse(
-            await response.Content.ReadAsStringAsync());
+        var body = await response.Content.ReadAsStringAsync();
+        var json = JsonDocument.Parse(body);
         Assert.Equal(3, json.RootElement.EnumerateObject().Count());
         var invitationId = json.RootElement.GetProperty("id").GetGuid();
-        var code = json.RootElement.GetProperty("code").GetString();
         var expiresAt = json.RootElement.GetProperty("expiresAt")
             .GetDateTimeOffset();
-        Assert.NotNull(code);
+        Assert.Equal(
+            "handedOff",
+            json.RootElement.GetProperty("deliveryStatus").GetString());
+        var delivered = TakeDelivery(invitationId);
+        var code = delivered.Code;
+        Assert.DoesNotContain(code, body, StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "code",
+            body,
+            StringComparison.OrdinalIgnoreCase);
         Assert.InRange(
             expiresAt,
             before.Add(EfTenantInvitationStore.InvitationLifetime)
@@ -69,11 +82,167 @@ public sealed class TenantInvitationIssuanceTests(
         Assert.Equal(
             normalizer.NormalizeEmail(recipientEmail),
             invitation.NormalizedEmail);
+        Assert.Equal(invitation.NormalizedEmail, delivered.RecipientEmail);
         Assert.Equal(Hash(code), invitation.CodeHash);
         Assert.DoesNotContain(code, invitation.CodeHash);
         Assert.Equal(expiresAt, invitation.ExpiresAt);
         Assert.Null(invitation.ClosedAt);
         Assert.Null(invitation.AcceptedAt);
+    }
+
+    [Fact]
+    public async Task Recorder_capacity_failure_returns_compensated_problem_details()
+    {
+        using var capacityFactory = factory.WithWebHostBuilder(_ =>
+        {
+        });
+        var tenantId = Guid.NewGuid();
+        using var owner = await RegisterMemberAsync(
+            capacityFactory,
+            tenantId,
+            TenantMembershipRole.Owner);
+        var recipientEmail =
+            $"capacity-failure-{Guid.NewGuid():N}@example.test";
+        var recorder = capacityFactory.Services
+            .GetRequiredService<RecordingTenantInvitationDelivery>();
+        var fillerIds = Enumerable.Range(
+                0,
+                RecordingTenantInvitationDelivery.Capacity)
+            .Select(_ => Guid.NewGuid())
+            .ToArray();
+        foreach (var fillerId in fillerIds)
+        {
+            await recorder.DeliverAsync(
+                fillerId,
+                $"FILLER-{Guid.NewGuid():N}@EXAMPLE.TEST",
+                $"filler-secret-{fillerId:N}",
+                DateTimeOffset.UtcNow.AddHours(1),
+                default);
+        }
+
+        try
+        {
+            var response = await owner.Client.PostAsJsonAsync(
+                "/api/tenant-invitations",
+                new { email = recipientEmail });
+
+            Assert.Equal(
+                HttpStatusCode.ServiceUnavailable,
+                response.StatusCode);
+            Assert.Equal(
+                "application/problem+json",
+                response.Content.Headers.ContentType?.MediaType);
+            var body = await response.Content.ReadAsStringAsync();
+            using var problem = JsonDocument.Parse(body);
+            Assert.Equal(
+                "deliveryFailedCompensated",
+                problem.RootElement.GetProperty("deliveryStatus")
+                    .GetString());
+            Assert.DoesNotContain(
+                recipientEmail,
+                body,
+                StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(
+                "code",
+                body,
+                StringComparison.OrdinalIgnoreCase);
+
+            await using var scope = capacityFactory.Services
+                .CreateAsyncScope();
+            var dbContext = scope.ServiceProvider
+                .GetRequiredService<FeatureLabDbContext>();
+            var normalizer = scope.ServiceProvider
+                .GetRequiredService<ILookupNormalizer>();
+            var normalizedEmail = normalizer.NormalizeEmail(recipientEmail);
+            var invitation = await dbContext.TenantInvitations
+                .SingleAsync(candidate =>
+                    candidate.TenantId == tenantId
+                    && candidate.NormalizedEmail == normalizedEmail);
+            Assert.NotNull(invitation.ClosedAt);
+            Assert.Equal(2, invitation.Version);
+            Assert.False(recorder.TryTake(invitation.Id, out _));
+        }
+        finally
+        {
+            foreach (var fillerId in fillerIds)
+            {
+                recorder.TryTake(fillerId, out _);
+            }
+        }
+
+        var retry = await owner.Client.PostAsJsonAsync(
+            "/api/tenant-invitations",
+            new { email = recipientEmail });
+        Assert.Equal(HttpStatusCode.Created, retry.StatusCode);
+        var handedOff = await retry.Content
+            .ReadFromJsonAsync<IssueInvitationResponse>();
+        Assert.NotNull(handedOff);
+        Assert.Equal("handedOff", handedOff.DeliveryStatus);
+        Assert.True(recorder.TryTake(handedOff.Id, out _));
+    }
+
+    [Fact]
+    public async Task Concurrent_close_after_delivery_failure_returns_unknown_problem_details()
+    {
+        var logs = new CapturingLoggerProvider();
+        using var unknownFactory = factory.WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureLogging(logging => logging.AddProvider(logs));
+            builder.ConfigureServices(services =>
+            {
+                services.RemoveAll<ITenantInvitationDelivery>();
+                services.AddSingleton<CloseThenFailDelivery>();
+                services.AddSingleton<ITenantInvitationDelivery>(provider =>
+                    provider.GetRequiredService<CloseThenFailDelivery>());
+            });
+        });
+        var tenantId = Guid.NewGuid();
+        using var owner = await RegisterMemberAsync(
+            unknownFactory,
+            tenantId,
+            TenantMembershipRole.Owner);
+        var recipientEmail =
+            $"unknown-delivery-{Guid.NewGuid():N}@example.test";
+
+        var response = await owner.Client.PostAsJsonAsync(
+            "/api/tenant-invitations",
+            new { email = recipientEmail });
+
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        var body = await response.Content.ReadAsStringAsync();
+        using var problem = JsonDocument.Parse(body);
+        Assert.Equal(
+            "deliveryOutcomeUnknown",
+            problem.RootElement.GetProperty("deliveryStatus").GetString());
+        Assert.Contains(
+            "Refresh pending invitations",
+            problem.RootElement.GetProperty("detail").GetString(),
+            StringComparison.Ordinal);
+        var failingDelivery = unknownFactory.Services
+            .GetRequiredService<CloseThenFailDelivery>();
+        Assert.NotNull(failingDelivery.Code);
+        Assert.DoesNotContain(
+            failingDelivery.Code,
+            body,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            logs.Messages,
+            message => message.Contains(
+                failingDelivery.Code,
+                StringComparison.Ordinal));
+        Assert.DoesNotContain(
+            logs.Messages,
+            message => message.Contains(
+                recipientEmail,
+                StringComparison.OrdinalIgnoreCase));
+
+        await using var scope = unknownFactory.Services.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider
+            .GetRequiredService<FeatureLabDbContext>();
+        var invitation = await dbContext.TenantInvitations.SingleAsync(
+            candidate => candidate.Id == failingDelivery.InvitationId);
+        Assert.NotNull(invitation.ClosedAt);
+        Assert.Equal(2, invitation.Version);
     }
 
     [Fact]
@@ -366,10 +535,11 @@ public sealed class TenantInvitationIssuanceTests(
         var issued = await issue.Content
             .ReadFromJsonAsync<IssueInvitationResponse>();
         Assert.NotNull(issued);
+        var delivered = TakeDelivery(issued.Id);
 
         var acceptance = await recipient.Client.PostAsJsonAsync(
             "/api/tenant-invitations/accept",
-            new { code = issued.Code });
+            new { code = delivered.Code });
         Assert.Equal(HttpStatusCode.NoContent, acceptance.StatusCode);
 
         using var freshRecipient = await SignInAsync(
@@ -412,12 +582,13 @@ public sealed class TenantInvitationIssuanceTests(
         var issued = await issue.Content
             .ReadFromJsonAsync<IssueInvitationResponse>();
         Assert.NotNull(issued);
+        var delivered = TakeDelivery(issued.Id);
         using var unscopedSession = await SignInAsync(
             formerOwner.Email,
             formerOwner.Password);
         var acceptance = await unscopedSession.PostAsJsonAsync(
             "/api/tenant-invitations/accept",
-            new { code = issued.Code });
+            new { code = delivered.Code });
         Assert.Equal(HttpStatusCode.NoContent, acceptance.StatusCode);
 
         using var freshSession = await SignInAsync(
@@ -456,12 +627,13 @@ public sealed class TenantInvitationIssuanceTests(
         var issued = await issue.Content
             .ReadFromJsonAsync<IssueInvitationResponse>();
         Assert.NotNull(issued);
+        var delivered = TakeDelivery(issued.Id);
 
         var cancellation = await owner.Client.DeleteAsync(
             $"/api/tenant-invitations/{issued.Id}");
         var rejectedAcceptance = await recipient.Client.PostAsJsonAsync(
             "/api/tenant-invitations/accept",
-            new { code = issued.Code });
+            new { code = delivered.Code });
 
         Assert.Equal(HttpStatusCode.NoContent, cancellation.StatusCode);
         Assert.Equal(HttpStatusCode.BadRequest, rejectedAcceptance.StatusCode);
@@ -477,7 +649,7 @@ public sealed class TenantInvitationIssuanceTests(
         Assert.Null(invitation.AcceptedByUserId);
         Assert.Equal(2, invitation.Version);
         Assert.Equal(owner.UserId, invitation.IssuedByUserId);
-        Assert.Equal(Hash(issued.Code), invitation.CodeHash);
+        Assert.Equal(Hash(delivered.Code), invitation.CodeHash);
         Assert.Equal(Guid.Empty, recipientUser.TenantId);
         Assert.DoesNotContain(
             dbContext.TenantMemberships,
@@ -513,6 +685,50 @@ public sealed class TenantInvitationIssuanceTests(
         var invitation = await dbContext.TenantInvitations.SingleAsync(
             invitation => invitation.Id == issued.Id);
         Assert.Equal(2, invitation.Version);
+    }
+
+    [Fact]
+    public async Task Undelivered_close_is_tenant_scoped_and_idempotent()
+    {
+        var tenantId = Guid.NewGuid();
+        using var owner = await RegisterMemberAsync(
+            tenantId,
+            TenantMembershipRole.Owner);
+        using var recipient = await RegisterUnscopedAsync();
+        var issue = await owner.Client.PostAsJsonAsync(
+            "/api/tenant-invitations",
+            new { email = recipient.Email });
+        var issued = await issue.Content
+            .ReadFromJsonAsync<IssueInvitationResponse>();
+        Assert.NotNull(issued);
+        var delivered = TakeDelivery(issued.Id);
+
+        await using var scope = factory.Services.CreateAsyncScope();
+        var invitations = scope.ServiceProvider
+            .GetRequiredService<ITenantInvitationStore>();
+        var wrongTenant = await invitations.CloseUndeliveredAsync(
+            Guid.NewGuid(),
+            issued.Id);
+        var closed = await invitations.CloseUndeliveredAsync(
+            tenantId,
+            issued.Id);
+        var repeated = await invitations.CloseUndeliveredAsync(
+            tenantId,
+            issued.Id);
+        var acceptance = await recipient.Client.PostAsJsonAsync(
+            "/api/tenant-invitations/accept",
+            new { code = delivered.Code });
+
+        Assert.Equal(
+            CloseUndeliveredTenantInvitationStatus.NoLongerOpen,
+            wrongTenant);
+        Assert.Equal(
+            CloseUndeliveredTenantInvitationStatus.Closed,
+            closed);
+        Assert.Equal(
+            CloseUndeliveredTenantInvitationStatus.NoLongerOpen,
+            repeated);
+        Assert.Equal(HttpStatusCode.BadRequest, acceptance.StatusCode);
     }
 
     [Fact]
@@ -591,9 +807,10 @@ public sealed class TenantInvitationIssuanceTests(
         var issued = await issue.Content
             .ReadFromJsonAsync<IssueInvitationResponse>();
         Assert.NotNull(issued);
+        var delivered = TakeDelivery(issued.Id);
         var acceptance = await recipient.Client.PostAsJsonAsync(
             "/api/tenant-invitations/accept",
-            new { code = issued.Code });
+            new { code = delivered.Code });
         Assert.Equal(HttpStatusCode.NoContent, acceptance.StatusCode);
 
         var accepted = await owner.Client.DeleteAsync(
@@ -734,6 +951,7 @@ public sealed class TenantInvitationIssuanceTests(
         var first = await firstIssue.Content
             .ReadFromJsonAsync<IssueInvitationResponse>();
         Assert.NotNull(first);
+        var firstDelivery = TakeDelivery(first.Id);
         var cancellation = await owner.Client.DeleteAsync(
             $"/api/tenant-invitations/{first.Id}");
         Assert.Equal(HttpStatusCode.NoContent, cancellation.StatusCode);
@@ -746,8 +964,9 @@ public sealed class TenantInvitationIssuanceTests(
 
         Assert.Equal(HttpStatusCode.Created, secondIssue.StatusCode);
         Assert.NotNull(second);
+        var secondDelivery = TakeDelivery(second.Id);
         Assert.NotEqual(first.Id, second.Id);
-        Assert.NotEqual(first.Code, second.Code);
+        Assert.NotEqual(firstDelivery.Code, secondDelivery.Code);
         Assert.Equal(1, await PendingInvitationCountAsync(
             tenantId,
             recipient.Email));
@@ -770,13 +989,14 @@ public sealed class TenantInvitationIssuanceTests(
         var issued = await issue.Content
             .ReadFromJsonAsync<IssueInvitationResponse>();
         Assert.NotNull(issued);
+        var delivered = TakeDelivery(issued.Id);
 
         var attempts = await Task.WhenAll(
             owner.Client.DeleteAsync(
                 $"/api/tenant-invitations/{issued.Id}"),
             secondRecipientSession.PostAsJsonAsync(
                 "/api/tenant-invitations/accept",
-                new { code = issued.Code }));
+                new { code = delivered.Code }));
 
         Assert.Contains(
             attempts[0].StatusCode,
@@ -855,15 +1075,24 @@ public sealed class TenantInvitationIssuanceTests(
 
     private async Task<RegisteredMember> RegisterMemberAsync(
         Guid tenantId,
+        TenantMembershipRole role) =>
+        await RegisterMemberAsync(factory, tenantId, role);
+
+    private async Task<RegisteredMember> RegisterMemberAsync(
+        WebApplicationFactory<Program> host,
+        Guid tenantId,
         TenantMembershipRole role)
     {
-        var account = await RegisterAccountAsync();
+        var account = await RegisterAccountAsync(host);
         await TenantTestData.ProvisionAsync(
-            factory.Services,
+            host.Services,
             account.Email,
             tenantId,
             role: role);
-        var client = await SignInAsync(account.Email, account.Password);
+        var client = await SignInAsync(
+            host,
+            account.Email,
+            account.Password);
         return new RegisteredMember(
             client,
             account.UserId,
@@ -882,9 +1111,13 @@ public sealed class TenantInvitationIssuanceTests(
             account.Password);
     }
 
-    private async Task<RegisteredAccount> RegisterAccountAsync()
+    private Task<RegisteredAccount> RegisterAccountAsync() =>
+        RegisterAccountAsync(factory);
+
+    private static async Task<RegisteredAccount> RegisterAccountAsync(
+        WebApplicationFactory<Program> host)
     {
-        using var client = factory.CreateClient();
+        using var client = host.CreateClient();
         var email = $"issuance-member-{Guid.NewGuid():N}@example.test";
         const string password = "FeatureLab!123";
         var registration = await client.PostAsJsonAsync(
@@ -892,7 +1125,7 @@ public sealed class TenantInvitationIssuanceTests(
             new { email, password });
         registration.EnsureSuccessStatusCode();
 
-        await using var scope = factory.Services.CreateAsyncScope();
+        await using var scope = host.Services.CreateAsyncScope();
         var dbContext = scope.ServiceProvider
             .GetRequiredService<FeatureLabDbContext>();
         var userId = await dbContext.Users
@@ -904,9 +1137,15 @@ public sealed class TenantInvitationIssuanceTests(
 
     private async Task<HttpClient> SignInAsync(
         string email,
+        string password) =>
+        await SignInAsync(factory, email, password);
+
+    private static async Task<HttpClient> SignInAsync(
+        WebApplicationFactory<Program> host,
+        string email,
         string password)
     {
-        var client = factory.CreateClient();
+        var client = host.CreateClient();
         var login = await client.PostAsJsonAsync(
             "/account/login",
             new { email, password });
@@ -950,6 +1189,14 @@ public sealed class TenantInvitationIssuanceTests(
                 && invitation.ClosedAt == null);
     }
 
+    private RecordedTenantInvitationDelivery TakeDelivery(Guid invitationId)
+    {
+        var recorder = factory.Services
+            .GetRequiredService<RecordingTenantInvitationDelivery>();
+        Assert.True(recorder.TryTake(invitationId, out var delivery));
+        return delivery;
+    }
+
     private static string Hash(string code) =>
         Convert.ToHexString(
             SHA256.HashData(Encoding.UTF8.GetBytes(code)));
@@ -970,6 +1217,75 @@ public sealed class TenantInvitationIssuanceTests(
 
     private sealed record IssueInvitationResponse(
         Guid Id,
-        string Code,
-        DateTimeOffset ExpiresAt);
+        DateTimeOffset ExpiresAt,
+        string DeliveryStatus);
+
+    private sealed class CloseThenFailDelivery(
+        IServiceScopeFactory scopeFactory,
+        TimeProvider timeProvider) : ITenantInvitationDelivery
+    {
+        public Guid InvitationId { get; private set; }
+
+        public string? Code { get; private set; }
+
+        public async Task DeliverAsync(
+            Guid invitationId,
+            string recipientEmail,
+            string code,
+            DateTimeOffset expiresAt,
+            CancellationToken cancellationToken)
+        {
+            InvitationId = invitationId;
+            Code = code;
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var dbContext = scope.ServiceProvider
+                .GetRequiredService<FeatureLabDbContext>();
+            var invitation = await dbContext.TenantInvitations.SingleAsync(
+                candidate => candidate.Id == invitationId,
+                CancellationToken.None);
+            invitation.Close(timeProvider.GetUtcNow());
+            await dbContext.SaveChangesAsync(CancellationToken.None);
+
+            throw new InvalidOperationException(
+                $"Provider failure included {recipientEmail} and {code}.");
+        }
+    }
+
+    private sealed class CapturingLoggerProvider : ILoggerProvider
+    {
+        private readonly ConcurrentQueue<string> _messages = new();
+
+        public IReadOnlyCollection<string> Messages => _messages.ToArray();
+
+        public ILogger CreateLogger(string categoryName) =>
+            new CapturingLogger(_messages);
+
+        public void Dispose()
+        {
+        }
+
+        private sealed class CapturingLogger(
+            ConcurrentQueue<string> messages) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state)
+                where TState : notnull =>
+                null;
+
+            public bool IsEnabled(LogLevel logLevel) => true;
+
+            public void Log<TState>(
+                LogLevel logLevel,
+                EventId eventId,
+                TState state,
+                Exception? exception,
+                Func<TState, Exception?, string> formatter)
+            {
+                messages.Enqueue(formatter(state, exception));
+                if (exception is not null)
+                {
+                    messages.Enqueue(exception.ToString());
+                }
+            }
+        }
+    }
 }

@@ -69,6 +69,14 @@ if (!builder.Environment.IsEnvironment("Testing"))
 }
 builder.Services.AddSingleton(TimeProvider.System);
 builder.Services.AddScoped<ITenantInvitationStore, EfTenantInvitationStore>();
+builder.Services.AddScoped<TenantInvitationDeliveryService>();
+if (builder.Environment.IsDevelopment()
+    || builder.Environment.IsEnvironment("Testing"))
+{
+    builder.Services.AddSingleton<RecordingTenantInvitationDelivery>();
+    builder.Services.AddSingleton<ITenantInvitationDelivery>(services =>
+        services.GetRequiredService<RecordingTenantInvitationDelivery>());
+}
 builder.Services.AddScoped<ITenantMembershipStore, EfTenantMembershipStore>();
 builder.Services.AddScoped<IAuthorizationHandler, ActiveTenantMembershipHandler>();
 builder.Services.AddScoped<IAuthorizationHandler, TenantOwnerHandler>();
@@ -85,6 +93,12 @@ builder.Services.AddSignalR(options =>
 });
 
 var app = builder.Build();
+
+using (var deliveryScope = app.Services.CreateScope())
+{
+    _ = deliveryScope.ServiceProvider
+        .GetRequiredService<ITenantInvitationDelivery>();
+}
 
 app.UseExceptionHandler();
 app.UseBlazorFrameworkFiles();

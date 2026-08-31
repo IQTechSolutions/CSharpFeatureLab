@@ -91,9 +91,9 @@ public sealed class PendingInvitationsPanelTests : BunitContext
     }
 
     [Fact]
-    public async Task Issue_reveals_the_raw_code_once_and_refreshes_the_safe_list()
+    public async Task Issue_handoff_refreshes_the_safe_list_without_secret_ui()
     {
-        const string code = "server-issued-acceptance-code";
+        const string rawCodeSentinel = "raw-code-must-never-enter-client-state";
         var recipient = Recipient("invited-member");
         var invitationId = Guid.NewGuid();
         var expiresAt = new DateTimeOffset(
@@ -108,8 +108,8 @@ public sealed class PendingInvitationsPanelTests : BunitContext
         api.EnqueueList(new LoadPendingInvitationsResult.LoadedResult([]));
         api.EnqueueList(Loaded(invitationId, recipient));
         api.EnqueueIssue(
-            new IssuePendingInvitationResult.IssuedResult(
-                code,
+            new IssuePendingInvitationResult.HandedOffResult(
+                invitationId,
                 expiresAt));
         Services.AddSingleton<ITenantInvitationApi>(api);
         var panel = Render<PendingInvitationsPanel>();
@@ -124,15 +124,21 @@ public sealed class PendingInvitationsPanelTests : BunitContext
             Assert.Equal(1, api.IssueCallCount);
             Assert.Equal($"  {recipient}  ", Assert.Single(api.IssuedRecipients));
             Assert.Equal(2, api.ListCallCount);
-            var reveal = panel.Find("[data-testid=issued-code]");
             Assert.Equal(
-                code,
-                reveal.QuerySelector("input")?.GetAttribute("value"));
-            Assert.True(
-                reveal.QuerySelector("input")?.HasAttribute("readonly"));
-            Assert.Equal(1, Occurrences(panel.Markup, code));
+                "Invitation handed to the delivery service.",
+                panel.Find("[role=status]").TextContent);
             Assert.Contains(recipient, panel.Find("ul").TextContent);
-            Assert.DoesNotContain(code, panel.Find("ul").TextContent);
+            Assert.DoesNotContain(rawCodeSentinel, panel.Markup);
+            Assert.Empty(panel.FindAll("[data-testid=issued-code]"));
+            Assert.Empty(panel.FindAll("#acceptance-code"));
+            Assert.Empty(panel.FindAll(".one-time-code"));
+            Assert.DoesNotContain(
+                "acceptance code",
+                panel.Markup,
+                StringComparison.OrdinalIgnoreCase);
+            Assert.Null(
+                typeof(IssuePendingInvitationResult.HandedOffResult)
+                    .GetProperty("Code"));
             Assert.Equal(
                 string.Empty,
                 panel.Find("#recipient-email").GetAttribute("value"));
@@ -141,60 +147,43 @@ public sealed class PendingInvitationsPanelTests : BunitContext
     }
 
     [Fact]
-    public async Task Manual_refresh_clears_the_code_and_cannot_restore_it_from_the_list()
+    public async Task Handoff_success_is_not_reversed_when_safe_refresh_fails()
     {
-        const string code = "one-display-only-code";
-        var recipient = Recipient("invited-member");
+        var existingRecipient = Recipient("existing");
         var invitationId = Guid.NewGuid();
         var api = new StubTenantInvitationApi();
-        api.EnqueueList(new LoadPendingInvitationsResult.LoadedResult([]));
-        api.EnqueueList(Loaded(invitationId, recipient));
-        api.EnqueueList(Loaded(invitationId, recipient));
+        api.EnqueueList(Loaded(invitationId, existingRecipient));
+        api.EnqueueList(new LoadPendingInvitationsResult.FailureResult());
         api.EnqueueIssue(
-            IssuePendingInvitationResult.Issued(
-                code,
-                new DateTimeOffset(
-                    2026,
-                    9,
-                    2,
-                    16,
-                    30,
-                    0,
-                    TimeSpan.Zero)));
+            IssuePendingInvitationResult.HandedOff(
+                Guid.NewGuid(),
+                DateTimeOffset.UtcNow.AddDays(7)));
         Services.AddSingleton<ITenantInvitationApi>(api);
         var panel = Render<PendingInvitationsPanel>();
         panel.WaitForAssertion(() => Assert.Equal(1, api.ListCallCount));
 
         await panel.Find("#recipient-email").ChangeAsync(
-            new ChangeEventArgs { Value = recipient });
+            new ChangeEventArgs { Value = Recipient("new-member") });
         await panel.Find("form").SubmitAsync();
-        panel.WaitForAssertion(() => Assert.Contains(code, panel.Markup));
-
-        await FindButton(panel, "Refresh").ClickAsync(new MouseEventArgs());
 
         panel.WaitForAssertion(() =>
         {
-            Assert.Equal(3, api.ListCallCount);
+            Assert.Equal(2, api.ListCallCount);
             Assert.Equal(1, api.IssueCallCount);
-            Assert.DoesNotContain(code, panel.Markup);
-            Assert.Empty(panel.FindAll("[data-testid=issued-code]"));
-            Assert.Contains(recipient, panel.Find("ul").TextContent);
+            Assert.Contains(existingRecipient, panel.Find("ul").TextContent);
+            Assert.Contains(
+                "handed to the delivery service, but the latest list could not be loaded",
+                panel.Find("[role=alert]").TextContent,
+                StringComparison.Ordinal);
+            Assert.Empty(panel.FindAll(".success"));
         });
     }
 
     [Fact]
-    public async Task New_issue_clears_the_previous_code_and_blocks_duplicates()
+    public async Task Issue_blocks_duplicate_submissions()
     {
-        const string firstCode = "first-one-time-code";
-        var firstRecipient = Recipient("first-member");
-        var secondRecipient = Recipient("second-member");
         var api = new StubTenantInvitationApi();
         api.EnqueueList(new LoadPendingInvitationsResult.LoadedResult([]));
-        api.EnqueueList(Loaded(Guid.NewGuid(), firstRecipient));
-        api.EnqueueIssue(
-            IssuePendingInvitationResult.Issued(
-                firstCode,
-                DateTimeOffset.UtcNow.AddDays(7)));
         var pendingIssue =
             new TaskCompletionSource<IssuePendingInvitationResult>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
@@ -203,25 +192,114 @@ public sealed class PendingInvitationsPanelTests : BunitContext
         var panel = Render<PendingInvitationsPanel>();
         panel.WaitForAssertion(() => Assert.Equal(1, api.ListCallCount));
         await panel.Find("#recipient-email").ChangeAsync(
-            new ChangeEventArgs { Value = firstRecipient });
-        await panel.Find("form").SubmitAsync();
-        panel.WaitForAssertion(() => Assert.Contains(firstCode, panel.Markup));
-        await panel.Find("#recipient-email").ChangeAsync(
-            new ChangeEventArgs { Value = secondRecipient });
+            new ChangeEventArgs { Value = Recipient("new-member") });
 
         var firstSubmit = panel.Find("form").SubmitAsync();
         await panel.Find("form").SubmitAsync();
 
         panel.WaitForAssertion(() =>
         {
-            Assert.Equal(2, api.IssueCallCount);
-            Assert.DoesNotContain(firstCode, panel.Markup);
+            Assert.Equal(1, api.IssueCallCount);
             Assert.True(
                 FindButton(panel, "Issuing").HasAttribute("disabled"));
         });
 
         pendingIssue.SetResult(IssuePendingInvitationResult.Failure());
         await firstSubmit;
+    }
+
+    [Fact]
+    public async Task Compensated_delivery_failure_says_a_retry_is_safe()
+    {
+        var existingRecipient = Recipient("existing");
+        var api = new StubTenantInvitationApi();
+        api.EnqueueList(Loaded(Guid.NewGuid(), existingRecipient));
+        api.EnqueueIssue(
+            IssuePendingInvitationResult.DeliveryFailedCompensated());
+        Services.AddSingleton<ITenantInvitationApi>(api);
+        var panel = Render<PendingInvitationsPanel>();
+        panel.WaitForAssertion(() =>
+            Assert.Contains(existingRecipient, panel.Markup));
+
+        await panel.Find("#recipient-email").ChangeAsync(
+            new ChangeEventArgs { Value = Recipient("new-member") });
+        await panel.Find("form").SubmitAsync();
+
+        panel.WaitForAssertion(() =>
+        {
+            Assert.Equal(1, api.ListCallCount);
+            Assert.Contains(existingRecipient, panel.Markup);
+            var message = panel.Find("[role=alert]").TextContent;
+            Assert.Contains("closed", message, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(
+                "safe to retry",
+                message,
+                StringComparison.OrdinalIgnoreCase);
+            Assert.Empty(panel.FindAll(".success"));
+        });
+    }
+
+    [Fact]
+    public async Task Unknown_delivery_outcome_reconciles_before_retry()
+    {
+        var recipient = Recipient("uncertain");
+        var api = new StubTenantInvitationApi();
+        api.EnqueueList(new LoadPendingInvitationsResult.LoadedResult([]));
+        api.EnqueueList(Loaded(Guid.NewGuid(), recipient));
+        api.EnqueueIssue(
+            IssuePendingInvitationResult.DeliveryOutcomeUnknown());
+        Services.AddSingleton<ITenantInvitationApi>(api);
+        var panel = Render<PendingInvitationsPanel>();
+        panel.WaitForAssertion(() => Assert.Equal(1, api.ListCallCount));
+
+        await panel.Find("#recipient-email").ChangeAsync(
+            new ChangeEventArgs { Value = recipient });
+        await panel.Find("form").SubmitAsync();
+
+        panel.WaitForAssertion(() =>
+        {
+            Assert.Equal(2, api.ListCallCount);
+            Assert.Contains(recipient, panel.Find("ul").TextContent);
+            Assert.Contains(
+                "Cancel any remaining invitation before retrying.",
+                panel.Find("[role=alert]").TextContent,
+                StringComparison.Ordinal);
+            Assert.Empty(panel.FindAll(".success"));
+        });
+    }
+
+    [Fact]
+    public async Task Unknown_delivery_outcome_labels_a_failed_refresh_as_stale()
+    {
+        var existingRecipient = Recipient("existing");
+        var api = new StubTenantInvitationApi();
+        api.EnqueueList(Loaded(Guid.NewGuid(), existingRecipient));
+        api.EnqueueList(new LoadPendingInvitationsResult.FailureResult());
+        api.EnqueueIssue(
+            IssuePendingInvitationResult.DeliveryOutcomeUnknown());
+        Services.AddSingleton<ITenantInvitationApi>(api);
+        var panel = Render<PendingInvitationsPanel>();
+        panel.WaitForAssertion(() =>
+            Assert.Contains(existingRecipient, panel.Markup));
+
+        await panel.Find("#recipient-email").ChangeAsync(
+            new ChangeEventArgs { Value = Recipient("uncertain") });
+        await panel.Find("form").SubmitAsync();
+
+        panel.WaitForAssertion(() =>
+        {
+            Assert.Equal(2, api.ListCallCount);
+            Assert.Contains(existingRecipient, panel.Markup);
+            var message = panel.Find("[role=alert]").TextContent;
+            Assert.Contains(
+                "latest list could not be loaded",
+                message,
+                StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(
+                "cancel any remaining invitation before retrying",
+                message,
+                StringComparison.OrdinalIgnoreCase);
+        });
     }
 
     [Theory]
@@ -566,9 +644,6 @@ public sealed class PendingInvitationsPanelTests : BunitContext
 
     private static string Recipient(string localPart) =>
         $"{localPart}@example.test";
-
-    private static int Occurrences(string value, string search) =>
-        value.Split(search, StringSplitOptions.None).Length - 1;
 
     private static IElement FindButton(
         IRenderedComponent<PendingInvitationsPanel> panel,

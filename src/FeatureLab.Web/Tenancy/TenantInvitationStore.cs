@@ -2,6 +2,7 @@ using System.Data;
 using System.Net.Mail;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json.Serialization;
 using FeatureLab.Data;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.WebUtilities;
@@ -10,11 +11,47 @@ using Microsoft.EntityFrameworkCore;
 
 namespace FeatureLab.Tenancy;
 
-public sealed record IssuedTenantInvitation(
-    Guid Id,
-    string Code,
-    Guid TenantId,
-    DateTimeOffset ExpiresAt);
+public sealed class IssuedTenantInvitation
+{
+    public IssuedTenantInvitation(
+        Guid id,
+        string recipientEmail,
+        string code,
+        Guid tenantId,
+        DateTimeOffset expiresAt)
+    {
+        if (id == Guid.Empty
+            || tenantId == Guid.Empty
+            || string.IsNullOrWhiteSpace(recipientEmail)
+            || string.IsNullOrWhiteSpace(code))
+        {
+            throw new ArgumentException(
+                "A complete issued invitation is required.");
+        }
+
+        Id = id;
+        RecipientEmail = recipientEmail;
+        Code = code;
+        TenantId = tenantId;
+        ExpiresAt = expiresAt;
+    }
+
+    public Guid Id { get; }
+
+    public string RecipientEmail { get; }
+
+    [JsonIgnore]
+    public string Code { get; }
+
+    public Guid TenantId { get; }
+
+    public DateTimeOffset ExpiresAt { get; }
+
+    public override string ToString() =>
+        $"{nameof(IssuedTenantInvitation)} {{ Id = {Id}, "
+        + "RecipientEmail = [REDACTED], Code = [REDACTED], "
+        + $"TenantId = {TenantId}, ExpiresAt = {ExpiresAt:O} }}";
+}
 
 public sealed record PendingTenantInvitation(
     Guid Id,
@@ -30,11 +67,79 @@ public enum IssueTenantInvitationStatus
     Conflict,
 }
 
-public sealed record IssueTenantInvitationResult(
-    IssueTenantInvitationStatus Status,
-    Guid? Id = null,
-    string? Code = null,
-    DateTimeOffset? ExpiresAt = null);
+public sealed class IssueTenantInvitationResult
+{
+    private IssueTenantInvitationResult(
+        IssueTenantInvitationStatus status,
+        Guid? id = null,
+        string? recipientEmail = null,
+        string? code = null,
+        DateTimeOffset? expiresAt = null)
+    {
+        Status = status;
+        Id = id;
+        RecipientEmail = recipientEmail;
+        Code = code;
+        ExpiresAt = expiresAt;
+    }
+
+    public IssueTenantInvitationStatus Status { get; }
+
+    public Guid? Id { get; }
+
+    public string? RecipientEmail { get; }
+
+    [JsonIgnore]
+    public string? Code { get; }
+
+    public DateTimeOffset? ExpiresAt { get; }
+
+    public static IssueTenantInvitationResult Issued(
+        Guid id,
+        string recipientEmail,
+        string code,
+        DateTimeOffset expiresAt)
+    {
+        if (id == Guid.Empty
+            || string.IsNullOrWhiteSpace(recipientEmail)
+            || string.IsNullOrWhiteSpace(code))
+        {
+            throw new ArgumentException(
+                "A complete issued invitation result is required.");
+        }
+
+        return new(
+            IssueTenantInvitationStatus.Issued,
+            id,
+            recipientEmail,
+            code,
+            expiresAt);
+    }
+
+    public static IssueTenantInvitationResult FromStatus(
+        IssueTenantInvitationStatus status)
+    {
+        if (status == IssueTenantInvitationStatus.Issued)
+        {
+            throw new ArgumentException(
+                "An issued result requires invitation data.",
+                nameof(status));
+        }
+
+        return new(status);
+    }
+
+    public override string ToString() =>
+        $"{nameof(IssueTenantInvitationResult)} {{ Status = {Status}, "
+        + $"Id = {Id}, RecipientEmail = [REDACTED], "
+        + $"Code = [REDACTED], ExpiresAt = {ExpiresAt:O} }}";
+}
+
+public enum CloseUndeliveredTenantInvitationStatus
+{
+    Closed,
+    NoLongerOpen,
+}
 
 public enum CancelTenantInvitationStatus
 {
@@ -61,6 +166,11 @@ public interface ITenantInvitationStore
         long membershipVersion,
         Guid tenantId,
         string email,
+        CancellationToken cancellationToken = default);
+
+    Task<CloseUndeliveredTenantInvitationStatus> CloseUndeliveredAsync(
+        Guid tenantId,
+        Guid invitationId,
         CancellationToken cancellationToken = default);
 
     Task<IReadOnlyList<PendingTenantInvitation>?> ListPendingForOwnerAsync(
@@ -137,6 +247,7 @@ public sealed class EfTenantInvitationStore(
 
         return new IssuedTenantInvitation(
             invitation.Id,
+            normalizedEmail,
             code,
             invitation.TenantId,
             invitation.ExpiresAt);
@@ -155,13 +266,15 @@ public sealed class EfTenantInvitationStore(
             || membershipVersion <= 0
             || tenantId == Guid.Empty)
         {
-            return new(IssueTenantInvitationStatus.StaleOwner);
+            return IssueTenantInvitationResult.FromStatus(
+                IssueTenantInvitationStatus.StaleOwner);
         }
 
         var normalizedEmail = NormalizeEmail(email);
         if (normalizedEmail is null)
         {
-            return new(IssueTenantInvitationStatus.InvalidRecipient);
+            return IssueTenantInvitationResult.FromStatus(
+                IssueTenantInvitationStatus.InvalidRecipient);
         }
 
         try
@@ -178,7 +291,8 @@ public sealed class EfTenantInvitationStore(
                 cancellationToken);
             if (!isCurrentOwner)
             {
-                return new(IssueTenantInvitationStatus.StaleOwner);
+                return IssueTenantInvitationResult.FromStatus(
+                    IssueTenantInvitationStatus.StaleOwner);
             }
 
             var targetUserId = await dbContext.Users
@@ -195,7 +309,8 @@ public sealed class EfTenantInvitationStore(
                             && membership.IsActive,
                         cancellationToken))
             {
-                return new(IssueTenantInvitationStatus.ActiveMember);
+                return IssueTenantInvitationResult.FromStatus(
+                    IssueTenantInvitationStatus.ActiveMember);
             }
 
             var now = timeProvider.GetUtcNow();
@@ -209,7 +324,8 @@ public sealed class EfTenantInvitationStore(
             {
                 if (pending.ExpiresAt > now)
                 {
-                    return new(IssueTenantInvitationStatus.Conflict);
+                    return IssueTenantInvitationResult.FromStatus(
+                        IssueTenantInvitationStatus.Conflict);
                 }
 
                 pending.Close(now);
@@ -228,25 +344,62 @@ public sealed class EfTenantInvitationStore(
             await dbContext.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
 
-            return new(
-                IssueTenantInvitationStatus.Issued,
+            return IssueTenantInvitationResult.Issued(
                 invitation.Id,
+                normalizedEmail,
                 code,
                 invitation.ExpiresAt);
         }
         catch (DbUpdateConcurrencyException)
         {
-            return new(IssueTenantInvitationStatus.Conflict);
+            return IssueTenantInvitationResult.FromStatus(
+                IssueTenantInvitationStatus.Conflict);
         }
         catch (DbUpdateException exception)
             when (IsInvitationConflict(exception))
         {
-            return new(IssueTenantInvitationStatus.Conflict);
+            return IssueTenantInvitationResult.FromStatus(
+                IssueTenantInvitationStatus.Conflict);
         }
         catch (SqliteException exception)
             when (exception.SqliteErrorCode is 5 or 6 or 19)
         {
-            return new(IssueTenantInvitationStatus.Conflict);
+            return IssueTenantInvitationResult.FromStatus(
+                IssueTenantInvitationStatus.Conflict);
+        }
+    }
+
+    public async Task<CloseUndeliveredTenantInvitationStatus>
+        CloseUndeliveredAsync(
+            Guid tenantId,
+            Guid invitationId,
+            CancellationToken cancellationToken = default)
+    {
+        if (tenantId == Guid.Empty || invitationId == Guid.Empty)
+        {
+            return CloseUndeliveredTenantInvitationStatus.NoLongerOpen;
+        }
+
+        var invitation = await dbContext.TenantInvitations
+            .SingleOrDefaultAsync(
+                invitation => invitation.Id == invitationId
+                    && invitation.TenantId == tenantId
+                    && invitation.ClosedAt == null,
+                cancellationToken);
+        if (invitation is null)
+        {
+            return CloseUndeliveredTenantInvitationStatus.NoLongerOpen;
+        }
+
+        invitation.Close(timeProvider.GetUtcNow());
+        try
+        {
+            await dbContext.SaveChangesAsync(cancellationToken);
+            return CloseUndeliveredTenantInvitationStatus.Closed;
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            return CloseUndeliveredTenantInvitationStatus.NoLongerOpen;
         }
     }
 

@@ -318,8 +318,17 @@ public sealed class TenantInvitationListingTests(
             "/api/tenant-invitations",
             new { email });
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
-        return Assert.IsType<IssueInvitationResponse>(
-            await response.Content.ReadFromJsonAsync<IssueInvitationResponse>());
+        var handedOff = Assert.IsType<HandedOffInvitationResponse>(
+            await response.Content
+                .ReadFromJsonAsync<HandedOffInvitationResponse>());
+        Assert.Equal("handedOff", handedOff.DeliveryStatus);
+        var recorder = factory.Services
+            .GetRequiredService<RecordingTenantInvitationDelivery>();
+        Assert.True(recorder.TryTake(handedOff.Id, out var delivery));
+        return new IssueInvitationResponse(
+            handedOff.Id,
+            delivery.Code,
+            handedOff.ExpiresAt);
     }
 
     private async Task<RegisteredMember> RegisterMemberAsync(
@@ -399,6 +408,11 @@ public sealed class TenantInvitationListingTests(
         Guid Id,
         string Code,
         DateTimeOffset ExpiresAt);
+
+    private sealed record HandedOffInvitationResponse(
+        Guid Id,
+        DateTimeOffset ExpiresAt,
+        string DeliveryStatus);
 
     private sealed record PendingInvitationResponse(
         Guid Id,

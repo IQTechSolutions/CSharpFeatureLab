@@ -25,9 +25,15 @@ public abstract record IssuePendingInvitationResult
     {
     }
 
-    public sealed record IssuedResult(
-        string Code,
+    public sealed record HandedOffResult(
+        Guid Id,
         DateTimeOffset ExpiresAt)
+        : IssuePendingInvitationResult;
+
+    public sealed record DeliveryFailedCompensatedResult
+        : IssuePendingInvitationResult;
+
+    public sealed record DeliveryOutcomeUnknownResult
         : IssuePendingInvitationResult;
 
     public sealed record InvalidRecipientResult
@@ -45,10 +51,16 @@ public abstract record IssuePendingInvitationResult
     public sealed record FailureResult
         : IssuePendingInvitationResult;
 
-    public static IssuePendingInvitationResult Issued(
-        string code,
+    public static IssuePendingInvitationResult HandedOff(
+        Guid id,
         DateTimeOffset expiresAt) =>
-        new IssuedResult(code, expiresAt);
+        new HandedOffResult(id, expiresAt);
+
+    public static IssuePendingInvitationResult DeliveryFailedCompensated() =>
+        new DeliveryFailedCompensatedResult();
+
+    public static IssuePendingInvitationResult DeliveryOutcomeUnknown() =>
+        new DeliveryOutcomeUnknownResult();
 
     public static IssuePendingInvitationResult InvalidRecipient() =>
         new InvalidRecipientResult();

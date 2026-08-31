@@ -173,6 +173,14 @@
       "playlist": "Blazor",
       "checkpoint": "episode/19-blazor-one-time-invitation-code",
       "status": "release"
+    },
+    {
+      "number": 20,
+      "slug": "server-side-invitation-delivery",
+      "title": "Deliver Workspace Invitations Without Exposing the Code to Blazor",
+      "playlist": "Multi-tenancy",
+      "checkpoint": "episode/20-server-side-invitation-delivery",
+      "status": "release"
     }
   ]
 }

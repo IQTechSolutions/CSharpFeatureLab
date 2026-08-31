@@ -193,43 +193,6 @@ button:disabled {
     margin-top: 0;
 }
 
-.one-time-code {
-    margin: 1.5rem 0 0;
-    padding: 1rem;
-    border: 2px solid #2d65c4;
-    border-radius: 0.85rem;
-    background: #edf4ff;
-}
-
-.one-time-code h2,
-.one-time-code p {
-    margin: 0;
-}
-
-.one-time-code h2 {
-    font-size: 1.25rem;
-}
-
-.one-time-code p {
-    margin-top: 0.65rem;
-    color: #3c4e6a;
-    line-height: 1.5;
-}
-
-.one-time-code label {
-    display: block;
-    margin-top: 1rem;
-}
-
-.acceptance-code {
-    margin-top: 0.5rem;
-    font-family: "Cascadia Mono", Consolas, monospace;
-}
-
-.one-time-code .code-expiry {
-    font-size: 0.94rem;
-}
-
 .loading-state,
 .empty-state {
     margin: 1rem 0 0;
