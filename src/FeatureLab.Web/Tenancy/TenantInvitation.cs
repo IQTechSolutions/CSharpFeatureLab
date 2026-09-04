@@ -93,6 +93,21 @@ public sealed class TenantInvitation
             expiresAt,
             issuedByUserId);
 
+    public static TenantInvitation Create(
+        Guid id,
+        Guid tenantId,
+        string normalizedEmail,
+        string codeHash,
+        DateTimeOffset expiresAt,
+        string? issuedByUserId = null) =>
+        new(
+            id,
+            tenantId,
+            normalizedEmail,
+            codeHash,
+            expiresAt,
+            issuedByUserId);
+
     public void Close(DateTimeOffset closedAt)
     {
         if (ClosedAt is not null)

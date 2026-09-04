@@ -181,6 +181,14 @@
       "playlist": "Multi-tenancy",
       "checkpoint": "episode/20-server-side-invitation-delivery",
       "status": "release"
+    },
+    {
+      "number": 21,
+      "slug": "protected-transactional-outbox",
+      "title": "Queue Workspace Invitations with a Protected Transactional Outbox",
+      "playlist": "Multi-tenancy",
+      "checkpoint": "episode/21-protected-transactional-outbox",
+      "status": "release"
     }
   ]
 }

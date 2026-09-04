@@ -317,18 +317,32 @@ public sealed class TenantInvitationListingTests(
         var response = await client.PostAsJsonAsync(
             "/api/tenant-invitations",
             new { email });
-        Assert.Equal(HttpStatusCode.Created, response.StatusCode);
-        var handedOff = Assert.IsType<HandedOffInvitationResponse>(
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var queued = Assert.IsType<QueuedInvitationResponse>(
             await response.Content
-                .ReadFromJsonAsync<HandedOffInvitationResponse>());
-        Assert.Equal("handedOff", handedOff.DeliveryStatus);
+                .ReadFromJsonAsync<QueuedInvitationResponse>());
+        Assert.Equal("queued", queued.DeliveryStatus);
         var recorder = factory.Services
             .GetRequiredService<RecordingTenantInvitationDelivery>();
-        Assert.True(recorder.TryTake(handedOff.Id, out var delivery));
+        var dispatcher = factory.Services
+            .GetRequiredService<TenantInvitationOutboxDispatcher>();
+        RecordedTenantInvitationDelivery? delivery = null;
+        for (var attempt = 0; attempt < 100; attempt++)
+        {
+            await dispatcher.ProcessBatchAsync();
+            if (recorder.TryTake(queued.Id, out delivery))
+            {
+                break;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(50));
+        }
+
+        Assert.NotNull(delivery);
         return new IssueInvitationResponse(
-            handedOff.Id,
+            queued.Id,
             delivery.Code,
-            handedOff.ExpiresAt);
+            queued.ExpiresAt);
     }
 
     private async Task<RegisteredMember> RegisterMemberAsync(
@@ -409,7 +423,7 @@ public sealed class TenantInvitationListingTests(
         string Code,
         DateTimeOffset ExpiresAt);
 
-    private sealed record HandedOffInvitationResponse(
+    private sealed record QueuedInvitationResponse(
         Guid Id,
         DateTimeOffset ExpiresAt,
         string DeliveryStatus);

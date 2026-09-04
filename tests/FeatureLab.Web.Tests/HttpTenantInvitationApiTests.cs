@@ -8,7 +8,7 @@ namespace FeatureLab.Web.Tests;
 public sealed class HttpTenantInvitationApiTests
 {
     [Fact]
-    public async Task Issue_sends_only_the_recipient_and_maps_a_safe_handoff()
+    public async Task Issue_sends_only_the_recipient_and_maps_exact_queued_acceptance()
     {
         var invitationId = Guid.Parse(
             "1465d09d-1430-4a7c-bc7b-205f7396f128");
@@ -17,26 +17,27 @@ public sealed class HttpTenantInvitationApiTests
         var expiresAt = DateTimeOffset.Parse(
             "2026-09-02T16:30:00+00:00");
         var handler = new RecordingHttpMessageHandler(
-            HttpStatusCode.Created,
+            HttpStatusCode.Accepted,
             $$"""
             {
               "id": "{{invitationId}}",
               "expiresAt": "{{expiresAt:O}}",
-              "deliveryStatus": "handedOff"
+              "deliveryStatus": "queued"
             }
             """);
         var api = new HttpTenantInvitationApi(CreateClient(handler));
 
         var result = await api.IssueAsync($"  {recipient}  ");
 
-        var handedOff = Assert.IsType<
-            IssuePendingInvitationResult.HandedOffResult>(result);
-        Assert.Equal(invitationId, handedOff.Id);
-        Assert.Equal(expiresAt, handedOff.ExpiresAt);
-        Assert.Null(handedOff.GetType().GetProperty("Code"));
+        var queued = Assert.IsType<
+            IssuePendingInvitationResult.QueuedResult>(result);
+        Assert.Equal(invitationId, queued.Id);
+        Assert.Equal(expiresAt, queued.ExpiresAt);
+        Assert.Null(queued.GetType().GetProperty("Code"));
+        Assert.Null(queued.GetType().GetProperty("Provider"));
         Assert.DoesNotContain(
             rawCodeSentinel,
-            handedOff.ToString(),
+            queued.ToString(),
             StringComparison.Ordinal);
         Assert.Equal(HttpMethod.Post, handler.RequestMethod);
         Assert.Equal(
@@ -58,18 +59,20 @@ public sealed class HttpTenantInvitationApiTests
     }
 
     [Fact]
-    public async Task Issue_rejects_a_secret_bearing_success_body()
+    public async Task Issue_rejects_secret_or_provider_detail_in_success_body()
     {
         const string rawCodeSentinel = "raw-code-must-never-enter-client-state";
+        const string providerDetail = "private-provider-detail";
         var invitationId = Guid.NewGuid();
         var handler = new RecordingHttpMessageHandler(
-            HttpStatusCode.Created,
+            HttpStatusCode.Accepted,
             $$"""
             {
               "id": "{{invitationId}}",
               "expiresAt": "2026-09-02T16:30:00+00:00",
-              "deliveryStatus": "handedOff",
-              "code": "{{rawCodeSentinel}}"
+              "deliveryStatus": "queued",
+              "code": "{{rawCodeSentinel}}",
+              "provider": "{{providerDetail}}"
             }
             """);
         var api = new HttpTenantInvitationApi(CreateClient(handler));
@@ -81,14 +84,18 @@ public sealed class HttpTenantInvitationApiTests
             rawCodeSentinel,
             result.ToString(),
             StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            providerDetail,
+            result.ToString(),
+            StringComparison.Ordinal);
     }
 
     [Theory]
-    [InlineData("deliveryFailedCompensated", true)]
-    [InlineData("deliveryOutcomeUnknown", false)]
-    public async Task Issue_maps_exact_delivery_problem_status(
-        string deliveryStatus,
-        bool isCompensated)
+    [InlineData("deliveryFailedCompensated")]
+    [InlineData("deliveryOutcomeUnknown")]
+    [InlineData("unknown")]
+    public async Task Issue_maps_provider_failure_details_to_safe_generic_failure(
+        string deliveryStatus)
     {
         const string rawCodeSentinel = "raw-code-must-never-enter-client-state";
         var handler = new RecordingHttpMessageHandler(
@@ -106,19 +113,7 @@ public sealed class HttpTenantInvitationApiTests
 
         var result = await api.IssueAsync(Recipient("new-member"));
 
-        if (isCompensated)
-        {
-            Assert.IsType<
-                IssuePendingInvitationResult.DeliveryFailedCompensatedResult>(
-                result);
-        }
-        else
-        {
-            Assert.IsType<
-                IssuePendingInvitationResult.DeliveryOutcomeUnknownResult>(
-                result);
-        }
-
+        Assert.IsType<IssuePendingInvitationResult.FailureResult>(result);
         Assert.DoesNotContain(
             rawCodeSentinel,
             result.ToString(),
@@ -126,30 +121,12 @@ public sealed class HttpTenantInvitationApiTests
     }
 
     [Theory]
-    [InlineData("{}")]
-    [InlineData("{\"deliveryStatus\":\"DeliveryFailedCompensated\"}")]
-    [InlineData("{\"deliveryStatus\":\"unknown\"}")]
-    [InlineData("{\"deliveryStatus\":42}")]
-    [InlineData("not-json")]
-    public async Task Issue_maps_unknown_or_malformed_delivery_problem_to_failure(
-        string responseBody)
-    {
-        var handler = new RecordingHttpMessageHandler(
-            HttpStatusCode.ServiceUnavailable,
-            responseBody,
-            "application/problem+json");
-        var api = new HttpTenantInvitationApi(CreateClient(handler));
-
-        var result = await api.IssueAsync(Recipient("new-member"));
-
-        Assert.IsType<IssuePendingInvitationResult.FailureResult>(result);
-    }
-
-    [Theory]
     [InlineData((int)HttpStatusCode.BadRequest)]
     [InlineData((int)HttpStatusCode.Unauthorized)]
     [InlineData((int)HttpStatusCode.Forbidden)]
     [InlineData((int)HttpStatusCode.Conflict)]
+    [InlineData((int)HttpStatusCode.Created)]
+    [InlineData((int)HttpStatusCode.ServiceUnavailable)]
     [InlineData((int)HttpStatusCode.InternalServerError)]
     public async Task Issue_maps_each_safe_outcome(int statusCode)
     {
@@ -194,7 +171,7 @@ public sealed class HttpTenantInvitationApiTests
         string? recipient)
     {
         var handler = new RecordingHttpMessageHandler(
-            HttpStatusCode.Created,
+            HttpStatusCode.Accepted,
             null);
         var api = new HttpTenantInvitationApi(CreateClient(handler));
 
@@ -206,16 +183,17 @@ public sealed class HttpTenantInvitationApiTests
     }
 
     [Theory]
-    [InlineData("{\"id\":\"00000000-0000-0000-0000-000000000000\",\"expiresAt\":\"2026-09-02T16:30:00+00:00\",\"deliveryStatus\":\"handedOff\"}")]
-    [InlineData("{\"id\":\"1465d09d-1430-4a7c-bc7b-205f7396f128\",\"expiresAt\":\"0001-01-01T00:00:00+00:00\",\"deliveryStatus\":\"handedOff\"}")]
-    [InlineData("{\"id\":\"1465d09d-1430-4a7c-bc7b-205f7396f128\",\"expiresAt\":\"2026-09-02T16:30:00+00:00\",\"deliveryStatus\":\"HandedOff\"}")]
+    [InlineData("{\"id\":\"00000000-0000-0000-0000-000000000000\",\"expiresAt\":\"2026-09-02T16:30:00+00:00\",\"deliveryStatus\":\"queued\"}")]
+    [InlineData("{\"id\":\"1465d09d-1430-4a7c-bc7b-205f7396f128\",\"expiresAt\":\"0001-01-01T00:00:00+00:00\",\"deliveryStatus\":\"queued\"}")]
+    [InlineData("{\"id\":\"1465d09d-1430-4a7c-bc7b-205f7396f128\",\"expiresAt\":\"2026-09-02T16:30:00+00:00\",\"deliveryStatus\":\"Queued\"}")]
+    [InlineData("{\"id\":\"1465d09d-1430-4a7c-bc7b-205f7396f128\",\"expiresAt\":\"2026-09-02T16:30:00+00:00\",\"deliveryStatus\":\"unknown\"}")]
     [InlineData("{\"id\":\"1465d09d-1430-4a7c-bc7b-205f7396f128\",\"expiresAt\":\"2026-09-02T16:30:00+00:00\"}")]
     [InlineData("not-json")]
     public async Task Issue_maps_an_invalid_success_body_to_a_safe_failure(
         string responseBody)
     {
         var handler = new RecordingHttpMessageHandler(
-            HttpStatusCode.Created,
+            HttpStatusCode.Accepted,
             responseBody);
         var api = new HttpTenantInvitationApi(CreateClient(handler));
 

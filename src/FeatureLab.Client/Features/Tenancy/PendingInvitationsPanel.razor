@@ -19,7 +19,7 @@
     </div>
 
     <p class="intro">
-        The server chooses the workspace, hands invitations to the delivery service,
+        The server chooses the workspace, queues invitations for durable delivery,
         and returns only the management fields this panel needs.
     </p>
 
@@ -126,29 +126,12 @@
         try
         {
             var result = await InvitationApi.IssueAsync(_recipientEmail);
-            if (result is IssuePendingInvitationResult.HandedOffResult)
+            if (result is IssuePendingInvitationResult.QueuedResult)
             {
                 _recipientEmail = string.Empty;
                 await LoadAsync(
-                    "Invitation handed to the delivery service.",
-                    "The invitation was handed to the delivery service, but the latest list could not be loaded.");
-            }
-            else if (result is
-                IssuePendingInvitationResult.DeliveryFailedCompensatedResult)
-            {
-                _errorMessage =
-                    "The delivery service did not accept the invitation. The invitation was closed, so it is safe to retry.";
-            }
-            else if (result is
-                IssuePendingInvitationResult.DeliveryOutcomeUnknownResult)
-            {
-                const string reconciliationInstruction =
-                    "The delivery outcome is uncertain. Cancel any remaining invitation before retrying.";
-                await LoadAsync(
-                    refreshFailureMessage:
-                        "The delivery outcome is uncertain, and the latest list could not be loaded. Refresh the list and cancel any remaining invitation before retrying.",
-                    loadedWarningMessage: reconciliationInstruction,
-                    accessFailureContext: reconciliationInstruction);
+                    "Invitation queued for delivery.",
+                    "The invitation was queued for delivery, but the latest list could not be loaded.");
             }
             else if (result is IssuePendingInvitationResult.InvalidRecipientResult)
             {
@@ -185,8 +168,7 @@
     private async Task LoadAsync(
         string? successMessage = null,
         string? refreshFailureMessage = null,
-        string? loadedWarningMessage = null,
-        string? accessFailureContext = null)
+        string? loadedWarningMessage = null)
     {
         _isLoading = true;
         _successMessage = null;
@@ -204,16 +186,13 @@
             else if (result is LoadPendingInvitationsResult.UnauthorizedResult)
             {
                 _invitations = null;
-                _errorMessage = AppendContext(
-                    "Sign in before managing invitations.",
-                    accessFailureContext);
+                _errorMessage = "Sign in before managing invitations.";
             }
             else if (result is LoadPendingInvitationsResult.ForbiddenResult)
             {
                 _invitations = null;
-                _errorMessage = AppendContext(
-                    "Only a current workspace owner can manage invitations.",
-                    accessFailureContext);
+                _errorMessage =
+                    "Only a current workspace owner can manage invitations.";
             }
             else
             {
@@ -278,11 +257,6 @@
             _cancellingId = null;
         }
     }
-
-    private static string AppendContext(
-        string message,
-        string? context) =>
-        context is null ? message : $"{message} {context}";
 
     private static string MachineExpiry(DateTimeOffset expiresAt) =>
         expiresAt.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);

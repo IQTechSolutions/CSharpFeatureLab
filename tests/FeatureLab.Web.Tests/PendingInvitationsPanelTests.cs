@@ -91,7 +91,7 @@ public sealed class PendingInvitationsPanelTests : BunitContext
     }
 
     [Fact]
-    public async Task Issue_handoff_refreshes_the_safe_list_without_secret_ui()
+    public async Task Issue_queued_refreshes_the_safe_list_without_delivery_details()
     {
         const string rawCodeSentinel = "raw-code-must-never-enter-client-state";
         var recipient = Recipient("invited-member");
@@ -108,7 +108,7 @@ public sealed class PendingInvitationsPanelTests : BunitContext
         api.EnqueueList(new LoadPendingInvitationsResult.LoadedResult([]));
         api.EnqueueList(Loaded(invitationId, recipient));
         api.EnqueueIssue(
-            new IssuePendingInvitationResult.HandedOffResult(
+            new IssuePendingInvitationResult.QueuedResult(
                 invitationId,
                 expiresAt));
         Services.AddSingleton<ITenantInvitationApi>(api);
@@ -125,10 +125,14 @@ public sealed class PendingInvitationsPanelTests : BunitContext
             Assert.Equal($"  {recipient}  ", Assert.Single(api.IssuedRecipients));
             Assert.Equal(2, api.ListCallCount);
             Assert.Equal(
-                "Invitation handed to the delivery service.",
+                "Invitation queued for delivery.",
                 panel.Find("[role=status]").TextContent);
             Assert.Contains(recipient, panel.Find("ul").TextContent);
             Assert.DoesNotContain(rawCodeSentinel, panel.Markup);
+            Assert.DoesNotContain(
+                "provider",
+                panel.Markup,
+                StringComparison.OrdinalIgnoreCase);
             Assert.Empty(panel.FindAll("[data-testid=issued-code]"));
             Assert.Empty(panel.FindAll("#acceptance-code"));
             Assert.Empty(panel.FindAll(".one-time-code"));
@@ -137,8 +141,11 @@ public sealed class PendingInvitationsPanelTests : BunitContext
                 panel.Markup,
                 StringComparison.OrdinalIgnoreCase);
             Assert.Null(
-                typeof(IssuePendingInvitationResult.HandedOffResult)
+                typeof(IssuePendingInvitationResult.QueuedResult)
                     .GetProperty("Code"));
+            Assert.Null(
+                typeof(IssuePendingInvitationResult.QueuedResult)
+                    .GetProperty("Provider"));
             Assert.Equal(
                 string.Empty,
                 panel.Find("#recipient-email").GetAttribute("value"));
@@ -147,7 +154,7 @@ public sealed class PendingInvitationsPanelTests : BunitContext
     }
 
     [Fact]
-    public async Task Handoff_success_is_not_reversed_when_safe_refresh_fails()
+    public async Task Queued_success_is_not_reversed_when_safe_refresh_fails()
     {
         var existingRecipient = Recipient("existing");
         var invitationId = Guid.NewGuid();
@@ -155,7 +162,7 @@ public sealed class PendingInvitationsPanelTests : BunitContext
         api.EnqueueList(Loaded(invitationId, existingRecipient));
         api.EnqueueList(new LoadPendingInvitationsResult.FailureResult());
         api.EnqueueIssue(
-            IssuePendingInvitationResult.HandedOff(
+            IssuePendingInvitationResult.Queued(
                 Guid.NewGuid(),
                 DateTimeOffset.UtcNow.AddDays(7)));
         Services.AddSingleton<ITenantInvitationApi>(api);
@@ -172,7 +179,7 @@ public sealed class PendingInvitationsPanelTests : BunitContext
             Assert.Equal(1, api.IssueCallCount);
             Assert.Contains(existingRecipient, panel.Find("ul").TextContent);
             Assert.Contains(
-                "handed to the delivery service, but the latest list could not be loaded",
+                "queued for delivery, but the latest list could not be loaded",
                 panel.Find("[role=alert]").TextContent,
                 StringComparison.Ordinal);
             Assert.Empty(panel.FindAll(".success"));
@@ -206,100 +213,6 @@ public sealed class PendingInvitationsPanelTests : BunitContext
 
         pendingIssue.SetResult(IssuePendingInvitationResult.Failure());
         await firstSubmit;
-    }
-
-    [Fact]
-    public async Task Compensated_delivery_failure_says_a_retry_is_safe()
-    {
-        var existingRecipient = Recipient("existing");
-        var api = new StubTenantInvitationApi();
-        api.EnqueueList(Loaded(Guid.NewGuid(), existingRecipient));
-        api.EnqueueIssue(
-            IssuePendingInvitationResult.DeliveryFailedCompensated());
-        Services.AddSingleton<ITenantInvitationApi>(api);
-        var panel = Render<PendingInvitationsPanel>();
-        panel.WaitForAssertion(() =>
-            Assert.Contains(existingRecipient, panel.Markup));
-
-        await panel.Find("#recipient-email").ChangeAsync(
-            new ChangeEventArgs { Value = Recipient("new-member") });
-        await panel.Find("form").SubmitAsync();
-
-        panel.WaitForAssertion(() =>
-        {
-            Assert.Equal(1, api.ListCallCount);
-            Assert.Contains(existingRecipient, panel.Markup);
-            var message = panel.Find("[role=alert]").TextContent;
-            Assert.Contains("closed", message, StringComparison.OrdinalIgnoreCase);
-            Assert.Contains(
-                "safe to retry",
-                message,
-                StringComparison.OrdinalIgnoreCase);
-            Assert.Empty(panel.FindAll(".success"));
-        });
-    }
-
-    [Fact]
-    public async Task Unknown_delivery_outcome_reconciles_before_retry()
-    {
-        var recipient = Recipient("uncertain");
-        var api = new StubTenantInvitationApi();
-        api.EnqueueList(new LoadPendingInvitationsResult.LoadedResult([]));
-        api.EnqueueList(Loaded(Guid.NewGuid(), recipient));
-        api.EnqueueIssue(
-            IssuePendingInvitationResult.DeliveryOutcomeUnknown());
-        Services.AddSingleton<ITenantInvitationApi>(api);
-        var panel = Render<PendingInvitationsPanel>();
-        panel.WaitForAssertion(() => Assert.Equal(1, api.ListCallCount));
-
-        await panel.Find("#recipient-email").ChangeAsync(
-            new ChangeEventArgs { Value = recipient });
-        await panel.Find("form").SubmitAsync();
-
-        panel.WaitForAssertion(() =>
-        {
-            Assert.Equal(2, api.ListCallCount);
-            Assert.Contains(recipient, panel.Find("ul").TextContent);
-            Assert.Contains(
-                "Cancel any remaining invitation before retrying.",
-                panel.Find("[role=alert]").TextContent,
-                StringComparison.Ordinal);
-            Assert.Empty(panel.FindAll(".success"));
-        });
-    }
-
-    [Fact]
-    public async Task Unknown_delivery_outcome_labels_a_failed_refresh_as_stale()
-    {
-        var existingRecipient = Recipient("existing");
-        var api = new StubTenantInvitationApi();
-        api.EnqueueList(Loaded(Guid.NewGuid(), existingRecipient));
-        api.EnqueueList(new LoadPendingInvitationsResult.FailureResult());
-        api.EnqueueIssue(
-            IssuePendingInvitationResult.DeliveryOutcomeUnknown());
-        Services.AddSingleton<ITenantInvitationApi>(api);
-        var panel = Render<PendingInvitationsPanel>();
-        panel.WaitForAssertion(() =>
-            Assert.Contains(existingRecipient, panel.Markup));
-
-        await panel.Find("#recipient-email").ChangeAsync(
-            new ChangeEventArgs { Value = Recipient("uncertain") });
-        await panel.Find("form").SubmitAsync();
-
-        panel.WaitForAssertion(() =>
-        {
-            Assert.Equal(2, api.ListCallCount);
-            Assert.Contains(existingRecipient, panel.Markup);
-            var message = panel.Find("[role=alert]").TextContent;
-            Assert.Contains(
-                "latest list could not be loaded",
-                message,
-                StringComparison.OrdinalIgnoreCase);
-            Assert.Contains(
-                "cancel any remaining invitation before retrying",
-                message,
-                StringComparison.OrdinalIgnoreCase);
-        });
     }
 
     [Theory]

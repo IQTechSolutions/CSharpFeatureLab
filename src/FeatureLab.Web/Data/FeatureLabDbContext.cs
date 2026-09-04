@@ -19,6 +19,9 @@ public sealed class FeatureLabDbContext(
 
     public DbSet<TenantInvitation> TenantInvitations => Set<TenantInvitation>();
 
+    public DbSet<TenantInvitationOutboxMessage> TenantInvitationOutboxMessages =>
+        Set<TenantInvitationOutboxMessage>();
+
     public DbSet<TenantMembershipRecord> TenantMemberships =>
         Set<TenantMembershipRecord>();
 
@@ -124,6 +127,30 @@ public sealed class FeatureLabDbContext(
             .WithMany()
             .HasForeignKey(invitation => invitation.IssuedByUserId)
             .OnDelete(DeleteBehavior.Restrict);
+
+        var tenantInvitationOutbox =
+            modelBuilder.Entity<TenantInvitationOutboxMessage>();
+
+        tenantInvitationOutbox.ToTable("TenantInvitationOutbox");
+        tenantInvitationOutbox.HasKey(message => message.InvitationId);
+        tenantInvitationOutbox.Property(message => message.TenantId)
+            .IsRequired();
+        tenantInvitationOutbox.Property(message => message.ProtectedPayload)
+            .HasMaxLength(
+                TenantInvitationOutboxMessage.MaximumProtectedPayloadLength)
+            .IsRequired();
+        tenantInvitationOutbox.Property(message => message.CreatedAt)
+            .IsRequired();
+        tenantInvitationOutbox.HasOne<TenantInvitation>()
+            .WithOne()
+            .HasForeignKey<TenantInvitationOutboxMessage>(
+                message => message.InvitationId)
+            .OnDelete(DeleteBehavior.Cascade);
+        tenantInvitationOutbox.HasIndex(message => new
+        {
+            message.CreatedAt,
+            message.InvitationId,
+        });
 
         var chatMessage = modelBuilder.Entity<PersistedChatMessage>();
 

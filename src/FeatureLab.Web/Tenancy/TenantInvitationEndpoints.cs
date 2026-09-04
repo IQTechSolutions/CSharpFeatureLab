@@ -64,7 +64,7 @@ public static class TenantInvitationEndpoints
                     ClaimsPrincipal principal,
                     HttpContext httpContext,
                     ITenantContext tenant,
-                    TenantInvitationDeliveryService invitationDelivery,
+                    ITenantInvitationStore invitations,
                     IOptions<IdentityOptions> identityOptions,
                     CancellationToken cancellationToken) =>
                 {
@@ -89,8 +89,7 @@ public static class TenantInvitationEndpoints
                         return Results.Forbid();
                     }
 
-                    var result = await invitationDelivery
-                        .IssueAndDeliverForOwnerAsync(
+                    var result = await invitations.IssueForOwnerAsync(
                             userId,
                             securityStamps[0],
                             membershipVersion,
@@ -100,24 +99,18 @@ public static class TenantInvitationEndpoints
 
                     return result.Status switch
                     {
-                        IssueAndDeliverTenantInvitationStatus.HandedOff
-                            => HandedOffInvitation(httpContext, result),
-                        IssueAndDeliverTenantInvitationStatus.InvalidRecipient
+                        IssueTenantInvitationStatus.Queued
+                            => QueuedInvitation(httpContext, result),
+                        IssueTenantInvitationStatus.InvalidRecipient
                             => InvalidRecipient(),
-                        IssueAndDeliverTenantInvitationStatus.ActiveMember
-                            or IssueAndDeliverTenantInvitationStatus.Conflict
+                        IssueTenantInvitationStatus.ActiveMember
+                            or IssueTenantInvitationStatus.Conflict
                             => Results.Conflict(new
                             {
                                 error = "An invitation cannot be issued for this recipient.",
                             }),
-                        IssueAndDeliverTenantInvitationStatus.StaleOwner
+                        IssueTenantInvitationStatus.StaleOwner
                             => Results.Forbid(),
-                        IssueAndDeliverTenantInvitationStatus
-                                .DeliveryFailedCompensated
-                            => DeliveryFailedCompensated(),
-                        IssueAndDeliverTenantInvitationStatus
-                                .DeliveryOutcomeUnknown
-                            => DeliveryOutcomeUnknown(),
                         _ => throw new InvalidOperationException(
                             "Unknown invitation issuance result."),
                     };
@@ -227,20 +220,20 @@ public static class TenantInvitationEndpoints
 
     public sealed record IssueTenantInvitationRequest(string? Email);
 
-    private static IResult HandedOffInvitation(
+    private static IResult QueuedInvitation(
         HttpContext httpContext,
-        IssueAndDeliverTenantInvitationResult result)
+        IssueTenantInvitationResult result)
     {
         httpContext.Response.Headers.CacheControl = "no-store";
         return Results.Json(
-            new TenantInvitationHandedOffResponse(
+            new TenantInvitationQueuedResponse(
                 result.Id!.Value,
                 result.ExpiresAt!.Value,
-                "handedOff"),
-            statusCode: StatusCodes.Status201Created);
+                "queued"),
+            statusCode: StatusCodes.Status202Accepted);
     }
 
-    public sealed record TenantInvitationHandedOffResponse(
+    public sealed record TenantInvitationQueuedResponse(
         Guid Id,
         DateTimeOffset ExpiresAt,
         string DeliveryStatus);
@@ -250,26 +243,6 @@ public static class TenantInvitationEndpoints
         {
             error = "A valid invitation email is required.",
         });
-
-    private static IResult DeliveryFailedCompensated() =>
-        Results.Problem(
-            statusCode: StatusCodes.Status503ServiceUnavailable,
-            title: "Invitation delivery failed.",
-            detail: "The invitation was closed. Retry the invitation.",
-            extensions: new Dictionary<string, object?>
-            {
-                ["deliveryStatus"] = "deliveryFailedCompensated",
-            });
-
-    private static IResult DeliveryOutcomeUnknown() =>
-        Results.Problem(
-            statusCode: StatusCodes.Status503ServiceUnavailable,
-            title: "Invitation delivery outcome is unknown.",
-            detail: "Refresh pending invitations and cancel any remaining invitation before retrying.",
-            extensions: new Dictionary<string, object?>
-            {
-                ["deliveryStatus"] = "deliveryOutcomeUnknown",
-            });
 
     private static IResult CannotAccept() =>
         Results.BadRequest(new

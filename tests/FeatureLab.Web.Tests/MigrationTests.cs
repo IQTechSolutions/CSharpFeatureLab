@@ -36,7 +36,29 @@ public sealed class MigrationTests
                 migration => migration.EndsWith(
                     "_AddTenantOwnerInvitationIssuance",
                     StringComparison.Ordinal));
+            Assert.Contains(
+                appliedMigrations,
+                migration => migration.EndsWith(
+                    "_AddProtectedTenantInvitationOutbox",
+                    StringComparison.Ordinal));
             Assert.Empty(await dbContext.Database.GetPendingMigrationsAsync());
+            Assert.False(dbContext.Database.HasPendingModelChanges());
+            Assert.Empty(dbContext.TenantInvitationOutboxMessages);
+            var outboxType = dbContext.Model.FindEntityType(
+                typeof(TenantInvitationOutboxMessage));
+            Assert.NotNull(outboxType);
+            Assert.Equal(
+                TenantInvitationOutboxMessage.MaximumProtectedPayloadLength,
+                outboxType.FindProperty(
+                    nameof(TenantInvitationOutboxMessage.ProtectedPayload))!
+                    .GetMaxLength());
+            Assert.Contains(
+                outboxType.GetIndexes(),
+                index => index.Properties.Select(property => property.Name)
+                    .SequenceEqual([
+                        nameof(TenantInvitationOutboxMessage.CreatedAt),
+                        nameof(TenantInvitationOutboxMessage.InvitationId),
+                    ]));
             await AssertForeignKeysAreValidAsync(dbContext);
         }
         finally

@@ -60,7 +60,7 @@ public sealed record PendingTenantInvitation(
 
 public enum IssueTenantInvitationStatus
 {
-    Issued,
+    Queued,
     InvalidRecipient,
     ActiveMember,
     StaleOwner,
@@ -72,14 +72,10 @@ public sealed class IssueTenantInvitationResult
     private IssueTenantInvitationResult(
         IssueTenantInvitationStatus status,
         Guid? id = null,
-        string? recipientEmail = null,
-        string? code = null,
         DateTimeOffset? expiresAt = null)
     {
         Status = status;
         Id = id;
-        RecipientEmail = recipientEmail;
-        Code = code;
         ExpiresAt = expiresAt;
     }
 
@@ -87,42 +83,32 @@ public sealed class IssueTenantInvitationResult
 
     public Guid? Id { get; }
 
-    public string? RecipientEmail { get; }
-
-    [JsonIgnore]
-    public string? Code { get; }
-
     public DateTimeOffset? ExpiresAt { get; }
 
-    public static IssueTenantInvitationResult Issued(
+    public static IssueTenantInvitationResult Queued(
         Guid id,
-        string recipientEmail,
-        string code,
         DateTimeOffset expiresAt)
     {
-        if (id == Guid.Empty
-            || string.IsNullOrWhiteSpace(recipientEmail)
-            || string.IsNullOrWhiteSpace(code))
+        if (id == Guid.Empty)
         {
             throw new ArgumentException(
-                "A complete issued invitation result is required.");
+                "A queued invitation identifier is required.",
+                nameof(id));
         }
 
         return new(
-            IssueTenantInvitationStatus.Issued,
+            IssueTenantInvitationStatus.Queued,
             id,
-            recipientEmail,
-            code,
             expiresAt);
     }
 
     public static IssueTenantInvitationResult FromStatus(
         IssueTenantInvitationStatus status)
     {
-        if (status == IssueTenantInvitationStatus.Issued)
+        if (status == IssueTenantInvitationStatus.Queued)
         {
             throw new ArgumentException(
-                "An issued result requires invitation data.",
+                "A queued result requires invitation metadata.",
                 nameof(status));
         }
 
@@ -131,14 +117,7 @@ public sealed class IssueTenantInvitationResult
 
     public override string ToString() =>
         $"{nameof(IssueTenantInvitationResult)} {{ Status = {Status}, "
-        + $"Id = {Id}, RecipientEmail = [REDACTED], "
-        + $"Code = [REDACTED], ExpiresAt = {ExpiresAt:O} }}";
-}
-
-public enum CloseUndeliveredTenantInvitationStatus
-{
-    Closed,
-    NoLongerOpen,
+        + $"Id = {Id}, ExpiresAt = {ExpiresAt:O} }}";
 }
 
 public enum CancelTenantInvitationStatus
@@ -168,11 +147,6 @@ public interface ITenantInvitationStore
         string email,
         CancellationToken cancellationToken = default);
 
-    Task<CloseUndeliveredTenantInvitationStatus> CloseUndeliveredAsync(
-        Guid tenantId,
-        Guid invitationId,
-        CancellationToken cancellationToken = default);
-
     Task<IReadOnlyList<PendingTenantInvitation>?> ListPendingForOwnerAsync(
         string userId,
         string securityStamp,
@@ -198,7 +172,9 @@ public interface ITenantInvitationStore
 public sealed class EfTenantInvitationStore(
     FeatureLabDbContext dbContext,
     ILookupNormalizer normalizer,
-    TimeProvider timeProvider) : ITenantInvitationStore
+    TimeProvider timeProvider,
+    ITenantInvitationOutboxProtector outboxProtector)
+    : ITenantInvitationStore
 {
     public static readonly TimeSpan InvitationLifetime = TimeSpan.FromHours(24);
 
@@ -340,14 +316,26 @@ public sealed class EfTenantInvitationStore(
                 Hash(code),
                 now.Add(InvitationLifetime),
                 userId);
+            var protectedPayload = outboxProtector.Protect(
+                new TenantInvitationOutboxEnvelope(
+                    TenantInvitationOutboxEnvelope.CurrentVersion,
+                    invitation.Id,
+                    invitation.TenantId,
+                    invitation.NormalizedEmail,
+                    code,
+                    invitation.ExpiresAt));
             dbContext.TenantInvitations.Add(invitation);
+            dbContext.TenantInvitationOutboxMessages.Add(
+                TenantInvitationOutboxMessage.Create(
+                    invitation.Id,
+                    invitation.TenantId,
+                    protectedPayload,
+                    now));
             await dbContext.SaveChangesAsync(cancellationToken);
             await transaction.CommitAsync(cancellationToken);
 
-            return IssueTenantInvitationResult.Issued(
+            return IssueTenantInvitationResult.Queued(
                 invitation.Id,
-                normalizedEmail,
-                code,
                 invitation.ExpiresAt);
         }
         catch (DbUpdateConcurrencyException)
@@ -366,40 +354,6 @@ public sealed class EfTenantInvitationStore(
         {
             return IssueTenantInvitationResult.FromStatus(
                 IssueTenantInvitationStatus.Conflict);
-        }
-    }
-
-    public async Task<CloseUndeliveredTenantInvitationStatus>
-        CloseUndeliveredAsync(
-            Guid tenantId,
-            Guid invitationId,
-            CancellationToken cancellationToken = default)
-    {
-        if (tenantId == Guid.Empty || invitationId == Guid.Empty)
-        {
-            return CloseUndeliveredTenantInvitationStatus.NoLongerOpen;
-        }
-
-        var invitation = await dbContext.TenantInvitations
-            .SingleOrDefaultAsync(
-                invitation => invitation.Id == invitationId
-                    && invitation.TenantId == tenantId
-                    && invitation.ClosedAt == null,
-                cancellationToken);
-        if (invitation is null)
-        {
-            return CloseUndeliveredTenantInvitationStatus.NoLongerOpen;
-        }
-
-        invitation.Close(timeProvider.GetUtcNow());
-        try
-        {
-            await dbContext.SaveChangesAsync(cancellationToken);
-            return CloseUndeliveredTenantInvitationStatus.Closed;
-        }
-        catch (DbUpdateConcurrencyException)
-        {
-            return CloseUndeliveredTenantInvitationStatus.NoLongerOpen;
         }
     }
 

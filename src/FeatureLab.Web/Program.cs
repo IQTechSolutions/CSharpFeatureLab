@@ -6,6 +6,7 @@ using FeatureLab.Features.WorkItems;
 using FeatureLab.Tenancy;
 using Hangfire;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -19,6 +20,8 @@ builder.Services.AddScoped<ITenantContext>(
     services => services.GetRequiredService<TenantContext>());
 builder.Services.AddDbContext<FeatureLabDbContext>(options =>
     options.UseSqlite(connectionString));
+builder.Services.AddDataProtection()
+    .SetApplicationName("FeatureLab.CSharpFeatureLab");
 builder.Services.AddAuthorizationBuilder()
     .AddPolicy(
         TenantMembership.Policy,
@@ -68,8 +71,16 @@ if (!builder.Environment.IsEnvironment("Testing"))
     builder.Services.AddHangfireServer();
 }
 builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton<
+    ITenantInvitationOutboxProtector,
+    TenantInvitationOutboxProtector>();
 builder.Services.AddScoped<ITenantInvitationStore, EfTenantInvitationStore>();
-builder.Services.AddScoped<TenantInvitationDeliveryService>();
+builder.Services.AddSingleton<TenantInvitationOutboxDispatcher>();
+if (!builder.Environment.IsEnvironment("Testing"))
+{
+    builder.Services.AddHostedService<TenantInvitationOutboxDispatcher>(services =>
+        services.GetRequiredService<TenantInvitationOutboxDispatcher>());
+}
 if (builder.Environment.IsDevelopment()
     || builder.Environment.IsEnvironment("Testing"))
 {
