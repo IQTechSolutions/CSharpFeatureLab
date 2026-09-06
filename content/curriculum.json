@@ -189,6 +189,14 @@
       "playlist": "Multi-tenancy",
       "checkpoint": "episode/21-protected-transactional-outbox",
       "status": "release"
+    },
+    {
+      "number": 22,
+      "slug": "provider-boundary-idempotency",
+      "title": "Make Retried Delivery Idempotent at the Provider Boundary",
+      "playlist": "Production .NET",
+      "checkpoint": "episode/22-provider-boundary-idempotency",
+      "status": "release"
     }
   ]
 }

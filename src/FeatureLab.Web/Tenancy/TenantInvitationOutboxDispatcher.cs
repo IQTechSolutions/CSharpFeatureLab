@@ -97,8 +97,8 @@ public sealed class TenantInvitationOutboxDispatcher(
         }
 
         var retainedCount = 0;
-        // This single-process sequential worker is deliberately claim-free.
-        // Multi-node claims and durable retry scheduling belong to Episode 22.
+        // This single-process sequential worker deliberately has no durable
+        // retry schedule or distributed claim. Episodes 23 and 24 add those.
         foreach (var invitationId in invitationIds)
         {
             if (await DispatchOneAsync(invitationId, cancellationToken))

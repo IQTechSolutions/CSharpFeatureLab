@@ -64,6 +64,230 @@ public sealed class TenantInvitationDeliveryTests
             delivery.ToString(),
             StringComparison.OrdinalIgnoreCase);
         Assert.False(recorder.TryTake(invitationId, out _));
+        Assert.Equal(1L, recorder.AttemptCount);
+        Assert.Equal(1L, recorder.LogicalDeliveryCount);
+    }
+
+    [Fact]
+    public async Task Recorder_replays_identical_request_as_one_logical_effect()
+    {
+        var time = new ManualTimeProvider(DateTimeOffset.UtcNow);
+        using var recorder = new RecordingTenantInvitationDelivery(time);
+        var invitationId = Guid.NewGuid();
+        var recipient = NormalizedTestEmail("SEQUENTIAL-IDEMPOTENCY");
+        var code = "sequential-idempotency-secret";
+        var expiresAt = time.GetUtcNow().AddHours(1);
+
+        await recorder.DeliverAsync(
+            invitationId,
+            recipient,
+            code,
+            expiresAt,
+            default);
+        time.Advance(TimeSpan.FromSeconds(1));
+        await recorder.DeliverAsync(
+            invitationId,
+            recipient,
+            code,
+            expiresAt,
+            default);
+
+        Assert.Equal(2L, recorder.AttemptCount);
+        Assert.Equal(1L, recorder.LogicalDeliveryCount);
+        Assert.Equal(1, recorder.Count);
+        Assert.True(recorder.TryTake(invitationId, out var delivery));
+        Assert.Equal(code, delivery.Code);
+        Assert.False(recorder.TryTake(invitationId, out _));
+    }
+
+    [Fact]
+    public async Task Recorder_keeps_idempotency_after_one_time_pickup_expires()
+    {
+        var time = new ManualTimeProvider(DateTimeOffset.UtcNow);
+        using var recorder = new RecordingTenantInvitationDelivery(time);
+        var invitationId = Guid.NewGuid();
+        var recipient = NormalizedTestEmail("PICKUP-RETENTION");
+        var code = "pickup-retention-secret";
+        var expiresAt = time.GetUtcNow().AddHours(1);
+        await recorder.DeliverAsync(
+            invitationId,
+            recipient,
+            code,
+            expiresAt,
+            default);
+
+        time.Advance(
+            RecordingTenantInvitationDelivery.AccessLifetime
+            + RecordingTenantInvitationDelivery.CleanupInterval);
+        Assert.Equal(0, recorder.Count);
+
+        await recorder.DeliverAsync(
+            invitationId,
+            recipient,
+            code,
+            expiresAt,
+            default);
+
+        Assert.Equal(2L, recorder.AttemptCount);
+        Assert.Equal(1L, recorder.LogicalDeliveryCount);
+        Assert.Equal(0, recorder.Count);
+        Assert.False(recorder.TryTake(invitationId, out _));
+        Assert.Equal(
+            TimeSpan.FromHours(24),
+            RecordingTenantInvitationDelivery.IdempotencyRetention);
+    }
+
+    [Fact]
+    public async Task Recorder_idempotency_is_bounded_to_provider_retention()
+    {
+        var time = new ManualTimeProvider(DateTimeOffset.UtcNow);
+        using var recorder = new RecordingTenantInvitationDelivery(time);
+        var invitationId = Guid.NewGuid();
+        var recipient = NormalizedTestEmail("BOUNDED-IDEMPOTENCY");
+        var code = "bounded-idempotency-secret";
+        var expiresAt = time.GetUtcNow().AddHours(48);
+        await recorder.DeliverAsync(
+            invitationId,
+            recipient,
+            code,
+            expiresAt,
+            default);
+        Assert.True(recorder.TryTake(invitationId, out _));
+
+        time.AdvanceWithoutRunningTimers(
+            RecordingTenantInvitationDelivery.IdempotencyRetention);
+        await recorder.DeliverAsync(
+            invitationId,
+            recipient,
+            code,
+            expiresAt,
+            default);
+
+        Assert.Equal(2L, recorder.AttemptCount);
+        Assert.Equal(2L, recorder.LogicalDeliveryCount);
+        Assert.Equal(1, recorder.Count);
+        Assert.True(recorder.TryTake(invitationId, out _));
+    }
+
+    [Theory]
+    [InlineData("recipient")]
+    [InlineData("code")]
+    [InlineData("expiry")]
+    public async Task Recorder_rejects_same_key_with_different_request_safely(
+        string mismatch)
+    {
+        var time = new ManualTimeProvider(DateTimeOffset.UtcNow);
+        using var recorder = new RecordingTenantInvitationDelivery(time);
+        var invitationId = Guid.NewGuid();
+        var recipient = NormalizedTestEmail("IDEMPOTENCY-CONFLICT");
+        var code = "idempotency-conflict-secret";
+        var expiresAt = time.GetUtcNow().AddHours(1);
+        await recorder.DeliverAsync(
+            invitationId,
+            recipient,
+            code,
+            expiresAt,
+            default);
+
+        var conflictingRecipient = mismatch == "recipient"
+            ? NormalizedTestEmail("DIFFERENT-IDEMPOTENCY-CONFLICT")
+            : recipient;
+        var conflictingCode = mismatch == "code"
+            ? "different-idempotency-conflict-secret"
+            : code;
+        var conflictingExpiry = mismatch == "expiry"
+            ? expiresAt.AddMinutes(1)
+            : expiresAt;
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => recorder.DeliverAsync(
+                invitationId,
+                conflictingRecipient,
+                conflictingCode,
+                conflictingExpiry,
+                default));
+
+        Assert.Equal(
+            "The invitation delivery idempotency key is already bound to different request content.",
+            exception.Message);
+        Assert.DoesNotContain(
+            recipient,
+            exception.ToString(),
+            StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            conflictingRecipient,
+            exception.ToString(),
+            StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(
+            code,
+            exception.ToString(),
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            conflictingCode,
+            exception.ToString(),
+            StringComparison.Ordinal);
+        Assert.Equal(2L, recorder.AttemptCount);
+        Assert.Equal(1L, recorder.LogicalDeliveryCount);
+        Assert.True(recorder.TryTake(invitationId, out var delivery));
+        Assert.Equal(code, delivery.Code);
+    }
+
+    [Fact]
+    public async Task Recorder_does_not_dedupe_different_invitation_ids()
+    {
+        var time = new ManualTimeProvider(DateTimeOffset.UtcNow);
+        using var recorder = new RecordingTenantInvitationDelivery(time);
+        var firstId = Guid.NewGuid();
+        var secondId = Guid.NewGuid();
+        var recipient = NormalizedTestEmail("DISTINCT-IDEMPOTENCY-KEYS");
+        var code = "distinct-idempotency-key-secret";
+        var expiresAt = time.GetUtcNow().AddHours(1);
+
+        await recorder.DeliverAsync(
+            firstId,
+            recipient,
+            code,
+            expiresAt,
+            default);
+        await recorder.DeliverAsync(
+            secondId,
+            recipient,
+            code,
+            expiresAt,
+            default);
+
+        Assert.Equal(2L, recorder.AttemptCount);
+        Assert.Equal(2L, recorder.LogicalDeliveryCount);
+        Assert.Equal(2, recorder.Count);
+        Assert.True(recorder.TryTake(firstId, out _));
+        Assert.True(recorder.TryTake(secondId, out _));
+    }
+
+    [Fact]
+    public async Task Recorder_concurrent_identical_replays_converge()
+    {
+        var time = new ManualTimeProvider(DateTimeOffset.UtcNow);
+        using var recorder = new RecordingTenantInvitationDelivery(time);
+        var invitationId = Guid.NewGuid();
+        var recipient = NormalizedTestEmail("CONCURRENT-IDEMPOTENCY");
+        var code = "concurrent-idempotency-secret";
+        var expiresAt = time.GetUtcNow().AddHours(1);
+        const int attemptCount = 32;
+
+        await Task.WhenAll(
+            Enumerable.Range(0, attemptCount)
+                .Select(_ => Task.Run(() => recorder.DeliverAsync(
+                    invitationId,
+                    recipient,
+                    code,
+                    expiresAt,
+                    default))));
+
+        Assert.Equal((long)attemptCount, recorder.AttemptCount);
+        Assert.Equal(1L, recorder.LogicalDeliveryCount);
+        Assert.Equal(1, recorder.Count);
+        Assert.True(recorder.TryTake(invitationId, out var delivery));
+        Assert.Equal(code, delivery.Code);
+        Assert.False(recorder.TryTake(invitationId, out _));
     }
 
     [Fact]
@@ -446,6 +670,118 @@ public sealed class TenantInvitationDeliveryTests
     }
 
     [Fact]
+    public async Task Provider_idempotency_survives_worker_restart_after_acceptance()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            $"feature-lab-idempotency-restart-{Guid.NewGuid():N}");
+        var databasePath = Path.Combine(root, "feature-lab.db");
+        var keyRingPath = Path.Combine(root, "keys");
+        Directory.CreateDirectory(keyRingPath);
+        var time = new ManualTimeProvider(DateTimeOffset.UtcNow);
+        var observation = new DeliveryObservation();
+        using var provider = new RecordingTenantInvitationDelivery(time);
+        var invitationId = Guid.NewGuid();
+        var tenantId = Guid.NewGuid();
+        var recipient = NormalizedTestEmail("IDEMPOTENCY-RESTART");
+        const string code = "idempotency-restart-capability";
+        var expiresAt = time.GetUtcNow().AddHours(1);
+
+        try
+        {
+            await using (var firstHost = CreateRestartServices(
+                databasePath,
+                keyRingPath,
+                time,
+                observation,
+                provider))
+            {
+                await using (var scope = firstHost.CreateAsyncScope())
+                {
+                    var dbContext = scope.ServiceProvider
+                        .GetRequiredService<FeatureLabDbContext>();
+                    await dbContext.Database.EnsureCreatedAsync();
+                    var protector = scope.ServiceProvider.GetRequiredService<
+                        ITenantInvitationOutboxProtector>();
+                    dbContext.TenantInvitations.Add(
+                        TenantInvitation.Create(
+                            invitationId,
+                            tenantId,
+                            recipient,
+                            Hash(code),
+                            expiresAt));
+                    dbContext.TenantInvitationOutboxMessages.Add(
+                        TenantInvitationOutboxMessage.Create(
+                            invitationId,
+                            tenantId,
+                            protector.Protect(
+                                new TenantInvitationOutboxEnvelope(
+                                    TenantInvitationOutboxEnvelope.CurrentVersion,
+                                    invitationId,
+                                    tenantId,
+                                    recipient,
+                                    code,
+                                    expiresAt)),
+                            time.GetUtcNow()));
+                    await dbContext.SaveChangesAsync();
+                    await dbContext.Database.ExecuteSqlRawAsync(
+                        """
+                        CREATE TRIGGER FailTenantInvitationOutboxDelete
+                        BEFORE DELETE ON TenantInvitationOutbox
+                        BEGIN
+                            SELECT RAISE(ABORT, 'simulated post-provider acknowledgement failure');
+                        END;
+                        """);
+                }
+
+                var dispatcher = firstHost.GetRequiredService<
+                    TenantInvitationOutboxDispatcher>();
+                await Assert.ThrowsAsync<DbUpdateException>(() =>
+                    dispatcher.ProcessBatchAsync());
+                Assert.Equal(1L, provider.AttemptCount);
+                Assert.Equal(1L, provider.LogicalDeliveryCount);
+            }
+
+            await using (var restartedHost = CreateRestartServices(
+                databasePath,
+                keyRingPath,
+                time,
+                observation,
+                provider))
+            {
+                await using (var repair = restartedHost.CreateAsyncScope())
+                {
+                    var dbContext = repair.ServiceProvider
+                        .GetRequiredService<FeatureLabDbContext>();
+                    await dbContext.Database.ExecuteSqlRawAsync(
+                        "DROP TRIGGER FailTenantInvitationOutboxDelete;");
+                }
+
+                var dispatcher = restartedHost.GetRequiredService<
+                    TenantInvitationOutboxDispatcher>();
+                await dispatcher.ProcessBatchAsync();
+
+                Assert.Equal(2L, provider.AttemptCount);
+                Assert.Equal(1L, provider.LogicalDeliveryCount);
+                Assert.True(provider.TryTake(invitationId, out var delivered));
+                Assert.Equal(code, delivered.Code);
+                Assert.False(provider.TryTake(invitationId, out _));
+                await using var scope = restartedHost.CreateAsyncScope();
+                Assert.Empty(scope.ServiceProvider
+                    .GetRequiredService<FeatureLabDbContext>()
+                    .TenantInvitationOutboxMessages);
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public async Task Dispatcher_delivers_outside_a_transaction_and_removes_message()
     {
         await using var harness = await DispatcherHarness.CreateAsync();
@@ -473,15 +809,26 @@ public sealed class TenantInvitationDeliveryTests
     }
 
     [Fact]
-    public async Task Failed_delete_after_handoff_can_deliver_the_message_again()
+    public async Task Failed_acknowledgement_retries_without_a_second_provider_effect()
     {
-        await using var harness = await DispatcherHarness.CreateAsync();
+        await using var harness = await DispatcherHarness.CreateAsync(
+            services =>
+            {
+                services.RemoveAll<ITenantInvitationDelivery>();
+                services.AddSingleton<RecordingTenantInvitationDelivery>();
+                services.AddSingleton<ITenantInvitationDelivery>(provider =>
+                    provider.GetRequiredService<
+                        RecordingTenantInvitationDelivery>());
+            });
+        var recorder = harness.Services.GetRequiredService<
+            RecordingTenantInvitationDelivery>();
         var invitationId = Guid.NewGuid();
+        var code = "duplicate-window-capability";
         await harness.SeedInvitationAsync(
             invitationId,
             Guid.NewGuid(),
             NormalizedTestEmail("AT-LEAST-ONCE"),
-            "duplicate-window-capability",
+            code,
             harness.Time.GetUtcNow().AddHours(1));
         await using (var setup = harness.Services.CreateAsyncScope())
         {
@@ -499,7 +846,9 @@ public sealed class TenantInvitationDeliveryTests
 
         await Assert.ThrowsAsync<DbUpdateException>(() =>
             harness.Dispatcher.ProcessBatchAsync());
-        Assert.Single(harness.Observation.Deliveries);
+        Assert.Equal(1L, recorder.AttemptCount);
+        Assert.Equal(1L, recorder.LogicalDeliveryCount);
+        Assert.Equal(1, recorder.Count);
         Assert.True(await harness.OutboxExistsAsync(invitationId));
 
         await using (var repair = harness.Services.CreateAsyncScope())
@@ -511,7 +860,12 @@ public sealed class TenantInvitationDeliveryTests
         }
         await harness.Dispatcher.ProcessBatchAsync();
 
-        Assert.Equal(2, harness.Observation.Deliveries.Count);
+        Assert.Equal(2L, recorder.AttemptCount);
+        Assert.Equal(1L, recorder.LogicalDeliveryCount);
+        Assert.Equal(1, recorder.Count);
+        Assert.True(recorder.TryTake(invitationId, out var delivery));
+        Assert.Equal(code, delivery.Code);
+        Assert.False(recorder.TryTake(invitationId, out _));
         Assert.False(await harness.OutboxExistsAsync(invitationId));
     }
 
@@ -901,7 +1255,8 @@ public sealed class TenantInvitationDeliveryTests
         string databasePath,
         string keyRingPath,
         TimeProvider timeProvider,
-        DeliveryObservation observation)
+        DeliveryObservation observation,
+        ITenantInvitationDelivery? delivery = null)
     {
         var services = new ServiceCollection();
         services.AddLogging();
@@ -919,7 +1274,15 @@ public sealed class TenantInvitationDeliveryTests
         services.AddSingleton<
             ITenantInvitationOutboxProtector,
             TenantInvitationOutboxProtector>();
-        services.AddScoped<ITenantInvitationDelivery, InspectingDelivery>();
+        if (delivery is null)
+        {
+            services.AddScoped<ITenantInvitationDelivery, InspectingDelivery>();
+        }
+        else
+        {
+            services.AddSingleton(delivery);
+        }
+
         services.AddSingleton<TenantInvitationOutboxDispatcher>();
         return services.BuildServiceProvider(
             new ServiceProviderOptions

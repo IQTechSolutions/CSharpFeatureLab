@@ -132,7 +132,7 @@ app.UseAuthorization();
 app.MapGet("/api/about", () => Results.Ok(new
 {
     application = "C# Feature Lab",
-    lesson = "Blazor invitation management with authoritative refresh",
+    lesson = "Idempotent invitation delivery at the provider boundary",
 }));
 app.MapGroup("/account").MapIdentityApi<FeatureLabUser>();
 app.MapTenantInvitationEndpoints();
