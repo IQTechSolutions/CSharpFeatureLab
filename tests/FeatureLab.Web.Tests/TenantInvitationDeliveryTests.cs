@@ -21,6 +21,83 @@ namespace FeatureLab.Web.Tests;
 
 public sealed class TenantInvitationDeliveryTests
 {
+    [Theory]
+    [InlineData(1, 27_880)]
+    [InlineData(2, 53_390)]
+    [InlineData(3, 131_690)]
+    public void Retry_delay_matches_approved_fixed_vectors(
+        int attemptCount,
+        int expectedMilliseconds)
+    {
+        var invitationId = Guid.Parse(
+            "00000000-0000-0000-0000-000000000001");
+
+        var delay = TenantInvitationOutboxMessage.CalculateRetryDelay(
+            invitationId,
+            attemptCount);
+
+        Assert.Equal(expectedMilliseconds, delay.TotalMilliseconds);
+    }
+
+    [Fact]
+    public void Retry_delay_is_deterministic_jittered_and_bounded()
+    {
+        var firstId = Guid.Parse(
+            "00000000-0000-0000-0000-000000000001");
+        var secondId = Guid.Parse(
+            "00000000-0000-0000-0000-000000000002");
+        var first = TenantInvitationOutboxMessage.CalculateRetryDelay(
+            firstId,
+            1);
+
+        Assert.Equal(
+            first,
+            TenantInvitationOutboxMessage.CalculateRetryDelay(firstId, 1));
+        Assert.NotEqual(
+            first,
+            TenantInvitationOutboxMessage.CalculateRetryDelay(secondId, 1));
+
+        var growing = Enumerable.Range(1, 6)
+            .Select(attempt =>
+                TenantInvitationOutboxMessage.CalculateRetryDelay(
+                    firstId,
+                    attempt))
+            .ToArray();
+        Assert.All(
+            growing.Zip(growing.Skip(1)),
+            pair => Assert.True(pair.Second > pair.First));
+        Assert.Equal(
+            TenantInvitationOutboxMessage.MaximumRetryDelay,
+            TenantInvitationOutboxMessage.CalculateRetryDelay(firstId, 7));
+        Assert.InRange(
+            TenantInvitationOutboxMessage.CalculateRetryDelay(
+                firstId,
+                int.MaxValue),
+            TimeSpan.Zero,
+            TenantInvitationOutboxMessage.MaximumRetryDelay);
+    }
+
+    [Fact]
+    public void Outbox_retry_state_rejects_unknown_failure_codes_without_mutation()
+    {
+        var createdAt = DateTimeOffset.UtcNow;
+        var message = TenantInvitationOutboxMessage.Create(
+            Guid.NewGuid(),
+            Guid.NewGuid(),
+            "protected-payload",
+            createdAt);
+        message.BeginAttempt();
+
+        Assert.Throws<ArgumentException>(() => message.ScheduleRetry(
+            createdAt,
+            createdAt.AddHours(1),
+            "provider leaked secret details"));
+
+        Assert.Equal(1, message.AttemptCount);
+        Assert.Equal(createdAt.UtcDateTime, message.NextAttemptAt);
+        Assert.Null(message.FailureCode);
+    }
+
     [Fact]
     public void Queued_result_contains_only_safe_metadata()
     {
@@ -449,6 +526,9 @@ public sealed class TenantInvitationDeliveryTests
             .SingleAsync();
         Assert.Equal(invitation.Id, message.InvitationId);
         Assert.Equal("captured-protected-payload", message.ProtectedPayload);
+        Assert.Equal(0, message.AttemptCount);
+        Assert.Equal(message.CreatedAt, message.NextAttemptAt);
+        Assert.Null(message.FailureCode);
         Assert.Equal(
             Hash(capturingProtector.Envelope.Code),
             invitation.CodeHash);
@@ -686,6 +766,7 @@ public sealed class TenantInvitationDeliveryTests
         var recipient = NormalizedTestEmail("IDEMPOTENCY-RESTART");
         const string code = "idempotency-restart-capability";
         var expiresAt = time.GetUtcNow().AddHours(1);
+        var nextAttemptAt = default(DateTime);
 
         try
         {
@@ -736,10 +817,19 @@ public sealed class TenantInvitationDeliveryTests
 
                 var dispatcher = firstHost.GetRequiredService<
                     TenantInvitationOutboxDispatcher>();
-                await Assert.ThrowsAsync<DbUpdateException>(() =>
-                    dispatcher.ProcessBatchAsync());
+                Assert.Equal(1, await dispatcher.ProcessBatchAsync());
                 Assert.Equal(1L, provider.AttemptCount);
                 Assert.Equal(1L, provider.LogicalDeliveryCount);
+                await using var verification = firstHost.CreateAsyncScope();
+                var retry = await verification.ServiceProvider
+                    .GetRequiredService<FeatureLabDbContext>()
+                    .TenantInvitationOutboxMessages
+                    .SingleAsync();
+                Assert.Equal(1, retry.AttemptCount);
+                Assert.Equal(
+                    TenantInvitationOutboxMessage.AcknowledgementFailureCode,
+                    retry.FailureCode);
+                nextAttemptAt = retry.NextAttemptAt;
             }
 
             await using (var restartedHost = CreateRestartServices(
@@ -759,6 +849,9 @@ public sealed class TenantInvitationDeliveryTests
 
                 var dispatcher = restartedHost.GetRequiredService<
                     TenantInvitationOutboxDispatcher>();
+                Assert.Equal(0, await dispatcher.ProcessBatchAsync());
+                time.AdvanceWithoutRunningTimers(
+                    nextAttemptAt - time.GetUtcNow().UtcDateTime);
                 await dispatcher.ProcessBatchAsync();
 
                 Assert.Equal(2L, provider.AttemptCount);
@@ -824,12 +917,13 @@ public sealed class TenantInvitationDeliveryTests
             RecordingTenantInvitationDelivery>();
         var invitationId = Guid.NewGuid();
         var code = "duplicate-window-capability";
+        var expiresAt = harness.Time.GetUtcNow().AddHours(1);
         await harness.SeedInvitationAsync(
             invitationId,
             Guid.NewGuid(),
             NormalizedTestEmail("AT-LEAST-ONCE"),
             code,
-            harness.Time.GetUtcNow().AddHours(1));
+            expiresAt);
         await using (var setup = harness.Services.CreateAsyncScope())
         {
             var dbContext = setup.ServiceProvider
@@ -844,12 +938,18 @@ public sealed class TenantInvitationDeliveryTests
                 """);
         }
 
-        await Assert.ThrowsAsync<DbUpdateException>(() =>
-            harness.Dispatcher.ProcessBatchAsync());
+        Assert.Equal(1, await harness.Dispatcher.ProcessBatchAsync());
         Assert.Equal(1L, recorder.AttemptCount);
         Assert.Equal(1L, recorder.LogicalDeliveryCount);
         Assert.Equal(1, recorder.Count);
         Assert.True(await harness.OutboxExistsAsync(invitationId));
+        var deferred = await harness.ReadOutboxStateAsync(invitationId);
+        Assert.Equal(1, deferred.AttemptCount);
+        Assert.Equal(
+            TenantInvitationOutboxMessage.AcknowledgementFailureCode,
+            deferred.FailureCode);
+        Assert.True(deferred.NextAttemptAt > deferred.CreatedAt);
+        Assert.Equal(0, await harness.Dispatcher.ProcessBatchAsync());
 
         await using (var repair = harness.Services.CreateAsyncScope())
         {
@@ -858,6 +958,8 @@ public sealed class TenantInvitationDeliveryTests
             await dbContext.Database.ExecuteSqlRawAsync(
                 "DROP TRIGGER FailTenantInvitationOutboxDelete;");
         }
+        harness.Time.AdvanceWithoutRunningTimers(
+            deferred.NextAttemptAt - harness.Time.GetUtcNow().UtcDateTime);
         await harness.Dispatcher.ProcessBatchAsync();
 
         Assert.Equal(2L, recorder.AttemptCount);
@@ -870,43 +972,188 @@ public sealed class TenantInvitationDeliveryTests
     }
 
     [Fact]
-    public async Task Provider_failure_retains_message_and_logs_no_secrets()
+    public async Task Provider_failure_persists_safe_backoff_and_waits_until_due()
     {
+        var failingDelivery = new FailingDelivery();
         await using var harness = await DispatcherHarness.CreateAsync(
             services =>
             {
                 services.RemoveAll<ITenantInvitationDelivery>();
-                services.AddScoped<ITenantInvitationDelivery,
-                    FailingDelivery>();
+                services.AddSingleton<ITenantInvitationDelivery>(
+                    failingDelivery);
             });
-        var invitationId = Guid.NewGuid();
+        var invitationId = Guid.Parse(
+            "00000000-0000-0000-0000-000000000001");
         var tenantId = Guid.NewGuid();
         var recipient = NormalizedTestEmail("FAILURE");
         var code = "provider-failure-capability";
+        var createdAt = harness.Time.GetUtcNow();
         await harness.SeedInvitationAsync(
             invitationId,
             tenantId,
             recipient,
             code,
-            harness.Time.GetUtcNow().AddHours(1));
+            createdAt.AddHours(1));
 
-        await harness.Dispatcher.ProcessBatchAsync();
+        Assert.Equal(1, await harness.Dispatcher.ProcessBatchAsync());
 
-        Assert.True(await harness.OutboxExistsAsync(invitationId));
-        var entry = Assert.Single(harness.Logger.Entries);
+        var firstFailure = await harness.ReadOutboxStateAsync(invitationId);
+        Assert.Equal(1, firstFailure.AttemptCount);
         Assert.Equal(
-            TenantInvitationOutboxDispatcher.DeliveryDeferredEvent,
-            entry.EventId);
-        Assert.DoesNotContain(code, entry.Message, StringComparison.Ordinal);
-        Assert.DoesNotContain(
-            recipient,
-            entry.Message,
-            StringComparison.OrdinalIgnoreCase);
-        Assert.Null(entry.Exception);
+            TenantInvitationOutboxMessage.ProviderFailureCode,
+            firstFailure.FailureCode);
+        Assert.Equal(
+            createdAt.UtcDateTime.AddMilliseconds(27_880),
+            firstFailure.NextAttemptAt);
+        Assert.Equal(1, failingDelivery.AttemptCount);
+        Assert.Equal(0, await harness.Dispatcher.ProcessBatchAsync());
+
+        harness.Time.AdvanceWithoutRunningTimers(
+            firstFailure.NextAttemptAt
+            - harness.Time.GetUtcNow().UtcDateTime
+            - TimeSpan.FromTicks(1));
+        Assert.Equal(0, await harness.Dispatcher.ProcessBatchAsync());
+        harness.Time.AdvanceWithoutRunningTimers(TimeSpan.FromTicks(1));
+        Assert.Equal(1, await harness.Dispatcher.ProcessBatchAsync());
+
+        var secondFailure = await harness.ReadOutboxStateAsync(invitationId);
+        Assert.Equal(2, secondFailure.AttemptCount);
+        Assert.Equal(
+            firstFailure.NextAttemptAt.AddMilliseconds(53_390),
+            secondFailure.NextAttemptAt);
+        Assert.Equal(2, failingDelivery.AttemptCount);
+        Assert.All(
+            harness.Logger.Entries,
+            entry =>
+            {
+                Assert.Equal(
+                    TenantInvitationOutboxDispatcher.DeliveryDeferredEvent,
+                    entry.EventId);
+                Assert.DoesNotContain(
+                    code,
+                    entry.Message,
+                    StringComparison.Ordinal);
+                Assert.DoesNotContain(
+                    recipient,
+                    entry.Message,
+                    StringComparison.OrdinalIgnoreCase);
+                Assert.DoesNotContain(
+                    "Provider exposed",
+                    entry.Message,
+                    StringComparison.Ordinal);
+                Assert.Null(entry.Exception);
+            });
     }
 
     [Fact]
-    public async Task Delivery_timeout_retains_message_without_waiting_for_adapter()
+    public async Task Attempt_persistence_failure_never_calls_the_provider()
+    {
+        await using var harness = await DispatcherHarness.CreateAsync();
+        var invitationId = Guid.NewGuid();
+        await harness.SeedInvitationAsync(
+            invitationId,
+            Guid.NewGuid(),
+            NormalizedTestEmail("ATTEMPT-SAVE"),
+            "attempt-save-capability",
+            harness.Time.GetUtcNow().AddHours(1));
+        await using (var setup = harness.Services.CreateAsyncScope())
+        {
+            var dbContext = setup.ServiceProvider
+                .GetRequiredService<FeatureLabDbContext>();
+            await dbContext.Database.ExecuteSqlRawAsync(
+                """
+                CREATE TRIGGER FailTenantInvitationAttemptUpdate
+                BEFORE UPDATE OF AttemptCount ON TenantInvitationOutbox
+                WHEN NEW.AttemptCount > OLD.AttemptCount
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated attempt persistence failure');
+                END;
+                """);
+        }
+
+        await Assert.ThrowsAsync<DbUpdateException>(() =>
+            harness.Dispatcher.ProcessBatchAsync());
+
+        Assert.Empty(harness.Observation.Deliveries);
+        var state = await harness.ReadOutboxStateAsync(invitationId);
+        Assert.Equal(0, state.AttemptCount);
+        Assert.Equal(state.CreatedAt, state.NextAttemptAt);
+        Assert.Null(state.FailureCode);
+    }
+
+    [Fact]
+    public async Task Retry_schedule_persistence_failure_is_atomic()
+    {
+        var failingDelivery = new FailingDelivery();
+        await using var harness = await DispatcherHarness.CreateAsync(
+            services =>
+            {
+                services.RemoveAll<ITenantInvitationDelivery>();
+                services.AddSingleton<ITenantInvitationDelivery>(
+                    failingDelivery);
+            });
+        var invitationId = Guid.NewGuid();
+        await harness.SeedInvitationAsync(
+            invitationId,
+            Guid.NewGuid(),
+            NormalizedTestEmail("RETRY-SAVE"),
+            "retry-save-capability",
+            harness.Time.GetUtcNow().AddHours(1));
+        await using (var setup = harness.Services.CreateAsyncScope())
+        {
+            var dbContext = setup.ServiceProvider
+                .GetRequiredService<FeatureLabDbContext>();
+            await dbContext.Database.ExecuteSqlRawAsync(
+                """
+                CREATE TRIGGER FailTenantInvitationRetryUpdate
+                BEFORE UPDATE OF NextAttemptAt, FailureCode
+                    ON TenantInvitationOutbox
+                WHEN NEW.FailureCode IS NOT NULL
+                BEGIN
+                    SELECT RAISE(ABORT, 'simulated retry persistence failure');
+                END;
+                """);
+        }
+
+        await Assert.ThrowsAsync<DbUpdateException>(() =>
+            harness.Dispatcher.ProcessBatchAsync());
+
+        Assert.Equal(1, failingDelivery.AttemptCount);
+        var state = await harness.ReadOutboxStateAsync(invitationId);
+        Assert.Equal(1, state.AttemptCount);
+        Assert.Equal(state.CreatedAt, state.NextAttemptAt);
+        Assert.Null(state.FailureCode);
+        Assert.Empty(harness.Logger.Entries);
+    }
+
+    [Fact]
+    public async Task Provider_cancellation_without_dispatcher_timeout_is_provider_failure()
+    {
+        await using var harness = await DispatcherHarness.CreateAsync(
+            services =>
+            {
+                services.RemoveAll<ITenantInvitationDelivery>();
+                services.AddSingleton<ITenantInvitationDelivery>(
+                    new SelfCanceledDelivery());
+            });
+        var invitationId = Guid.NewGuid();
+        await harness.SeedInvitationAsync(
+            invitationId,
+            Guid.NewGuid(),
+            NormalizedTestEmail("PROVIDER-CANCELED"),
+            "provider-canceled-capability",
+            harness.Time.GetUtcNow().AddHours(1));
+
+        Assert.Equal(1, await harness.Dispatcher.ProcessBatchAsync());
+
+        var state = await harness.ReadOutboxStateAsync(invitationId);
+        Assert.Equal(
+            TenantInvitationOutboxMessage.ProviderFailureCode,
+            state.FailureCode);
+    }
+
+    [Fact]
+    public async Task Delivery_timeout_persists_safe_backoff_without_waiting_for_adapter()
     {
         var nonCooperative = new NonCooperativeDelivery();
         await using var harness = await DispatcherHarness.CreateAsync(
@@ -918,12 +1165,13 @@ public sealed class TenantInvitationDeliveryTests
             });
         var invitationId = Guid.NewGuid();
         var code = "timeout-secret-capability";
+        var expiresAt = harness.Time.GetUtcNow().AddSeconds(5);
         await harness.SeedInvitationAsync(
             invitationId,
             Guid.NewGuid(),
             NormalizedTestEmail("TIMEOUT"),
             code,
-            harness.Time.GetUtcNow().AddHours(1));
+            expiresAt);
 
         var processing = harness.Dispatcher.ProcessBatchAsync();
         await nonCooperative.Started.Task;
@@ -936,6 +1184,12 @@ public sealed class TenantInvitationDeliveryTests
         await Task.Yield();
 
         Assert.True(await harness.OutboxExistsAsync(invitationId));
+        var retry = await harness.ReadOutboxStateAsync(invitationId);
+        Assert.Equal(1, retry.AttemptCount);
+        Assert.Equal(expiresAt.UtcDateTime, retry.NextAttemptAt);
+        Assert.Equal(
+            TenantInvitationOutboxMessage.DeliveryTimeoutFailureCode,
+            retry.FailureCode);
         var entry = Assert.Single(harness.Logger.Entries);
         Assert.Equal(
             TenantInvitationOutboxDispatcher.DeliveryDeferredEvent,
@@ -966,13 +1220,53 @@ public sealed class TenantInvitationDeliveryTests
 
         var processing = harness.Dispatcher.ProcessBatchAsync(stopping.Token);
         await nonCooperative.Started.Task;
+        var begun = await harness.ReadOutboxStateAsync(invitationId);
+        Assert.Equal(1, begun.AttemptCount);
+        Assert.Equal(begun.CreatedAt, begun.NextAttemptAt);
+        Assert.Null(begun.FailureCode);
         stopping.Cancel();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             async () => await processing);
         nonCooperative.Completion.SetResult();
-        Assert.True(await harness.OutboxExistsAsync(invitationId));
+        var retained = await harness.ReadOutboxStateAsync(invitationId);
+        Assert.Equal(begun, retained);
         Assert.Empty(harness.Logger.Entries);
+    }
+
+    [Fact]
+    public async Task Dispatcher_selects_past_and_exact_due_rows_but_not_future_rows()
+    {
+        await using var harness = await DispatcherHarness.CreateAsync();
+        var now = harness.Time.GetUtcNow();
+        var pastId = Guid.NewGuid();
+        var exactId = Guid.NewGuid();
+        var futureId = Guid.NewGuid();
+        foreach (var item in new[]
+                 {
+                     (pastId, now.AddTicks(-1), "PAST"),
+                     (exactId, now, "EXACT"),
+                     (futureId, now.AddTicks(1), "FUTURE"),
+                 })
+        {
+            await harness.SeedInvitationAsync(
+                item.Item1,
+                Guid.NewGuid(),
+                NormalizedTestEmail(item.Item3),
+                $"due-capability-{item.Item3}",
+                now.AddHours(1),
+                createdAt: item.Item2);
+        }
+
+        Assert.Equal(2, await harness.Dispatcher.ProcessBatchAsync());
+        Assert.Equal(
+            new[] { pastId, exactId },
+            harness.Observation.Deliveries.Select(item => item.InvitationId));
+        Assert.True(await harness.OutboxExistsAsync(futureId));
+
+        harness.Time.AdvanceWithoutRunningTimers(TimeSpan.FromTicks(1));
+        Assert.Equal(1, await harness.Dispatcher.ProcessBatchAsync());
+        Assert.False(await harness.OutboxExistsAsync(futureId));
     }
 
     [Theory]
@@ -1302,6 +1596,12 @@ public sealed class TenantInvitationDeliveryTests
         Version,
     }
 
+    private sealed record OutboxState(
+        DateTime CreatedAt,
+        int AttemptCount,
+        DateTime NextAttemptAt,
+        string? FailureCode);
+
     private sealed class DispatcherHarness : IAsyncDisposable
     {
         private readonly SqliteConnection _connection;
@@ -1427,7 +1727,8 @@ public sealed class TenantInvitationDeliveryTests
             DateTimeOffset expiresAt,
             bool includeOutbox = true,
             string? protectedPayload = null,
-            bool closeBeforeDispatch = false)
+            bool closeBeforeDispatch = false,
+            DateTimeOffset? createdAt = null)
         {
             var invitation = TenantInvitation.Create(
                 invitationId,
@@ -1466,10 +1767,26 @@ public sealed class TenantInvitationDeliveryTests
                         invitationId,
                         tenantId,
                         payload,
-                        Time.GetUtcNow()));
+                        createdAt ?? Time.GetUtcNow()));
             }
 
             await dbContext.SaveChangesAsync();
+        }
+
+        public async Task<OutboxState> ReadOutboxStateAsync(
+            Guid invitationId)
+        {
+            await using var scope = Services.CreateAsyncScope();
+            return await scope.ServiceProvider
+                .GetRequiredService<FeatureLabDbContext>()
+                .TenantInvitationOutboxMessages
+                .Where(message => message.InvitationId == invitationId)
+                .Select(message => new OutboxState(
+                    message.CreatedAt,
+                    message.AttemptCount,
+                    message.NextAttemptAt,
+                    message.FailureCode))
+                .SingleAsync();
         }
 
         public async Task<bool> OutboxExistsAsync(Guid invitationId)
@@ -1563,14 +1880,21 @@ public sealed class TenantInvitationDeliveryTests
 
     private sealed class FailingDelivery : ITenantInvitationDelivery
     {
+        private int _attemptCount;
+
+        public int AttemptCount => Volatile.Read(ref _attemptCount);
+
         public Task DeliverAsync(
             Guid invitationId,
             string recipientEmail,
             string code,
             DateTimeOffset expiresAt,
-            CancellationToken cancellationToken) =>
+            CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _attemptCount);
             throw new InvalidOperationException(
                 $"Provider exposed {recipientEmail} and {code}.");
+        }
     }
 
     private sealed class SelectivelyFailingDelivery(
@@ -1599,6 +1923,17 @@ public sealed class TenantInvitationDeliveryTests
                     OutboxRowObserved: true));
             return Task.CompletedTask;
         }
+    }
+
+    private sealed class SelfCanceledDelivery : ITenantInvitationDelivery
+    {
+        public Task DeliverAsync(
+            Guid invitationId,
+            string recipientEmail,
+            string code,
+            DateTimeOffset expiresAt,
+            CancellationToken cancellationToken) =>
+            Task.FromCanceled(new CancellationToken(canceled: true));
     }
 
     private sealed class NonCooperativeDelivery :

@@ -5,7 +5,7 @@
 - Branch: `main`
 - Mode: Builder
 - Status: APPROVED
-- Decision authority: Ivan delegated the selection on 2026-09-05 and explicitly approved the completed arc on 2026-09-06.
+- Decision authority: Ivan delegated the selection on 2026-09-05, explicitly approved the completed arc on 2026-09-06, and approved Episode 23 implementation and release on 2026-09-08.
 
 ## Problem statement
 
@@ -79,7 +79,7 @@ Episode 25 activates `MaxAttempts = 5`, meaning at most five provider calls: a c
 
 The provider adapter normalizes outcomes to `Accepted`, `DuplicateAccepted`, `TransientFailure(code)`, `PermanentFailure(code)`, or `Unknown(code)`; raw exceptions never become state. The row persists `LastOutcome = KnownNoEffect|Unknown` so a later worker can distinguish a confirmed rejection from an ambiguous handoff. Accepted outcomes acknowledge. Before Episode 25, non-success remains pending only while replay is inside the provider guarantee; Episode 25 makes permanent failures terminal immediately, applies the attempt budget to known-no-effect failures, and routes exhausted or out-of-window unknown outcomes to reconciliation.
 
-Episode 22 reuses the existing immutable `InvitationId`—already the outbox primary key and one-to-one delivery identity—as the provider idempotency key, so it needs no schema migration. If a future feature permits multiple independent delivery effects for one invitation, that future design must add a separate operation ID rather than prebuilding one here. Later migrations introduce only their episode's state: Episode 23 defaults existing rows to `Pending`, `AttemptCount = 0`, `NextAttemptAt = CreatedAt`, and null failure/first-attempt/dedupe-window values; Episode 24 adds null claim fields; Episode 25 adds null terminal fields, delivery version, and `RedriveCount = 0`. Deploy notes must state that attempts made before Episode 22 were not sent to an idempotency-aware provider and therefore cannot be deduplicated retroactively.
+Episode 22 reuses the existing immutable `InvitationId`—already the outbox primary key and one-to-one delivery identity—as the provider idempotency key, so it needs no schema migration. If a future feature permits multiple independent delivery effects for one invitation, that future design must add a separate operation ID rather than prebuilding one here. Later migrations introduce only their episode's state: Episode 23 defaults existing rows to `AttemptCount = 0`, `NextAttemptAt = CreatedAt`, and `FailureCode = null`; pending remains conceptual while the row exists. Episode 24 adds null claim fields; Episode 25 adds null terminal fields, delivery version, and `RedriveCount = 0`. Deploy notes must state that attempts made before Episode 22 were not sent to an idempotency-aware provider and therefore cannot be deduplicated retroactively.
 
 ## Episode contracts
 
@@ -131,7 +131,7 @@ Episode 22 reuses the existing immutable `InvitationId`—already the outbox pri
 - Query only due work and inject `TimeProvider` so tests control the clock.
 - Persist the next attempt atomically with the failed attempt outcome.
 
-**Backoff contract:** Encode the input as lower-case UTF-8 `InvitationId:D + ":" + AttemptCount`. Take the first unsigned 16-bit big-endian value from SHA-256 and divide by 65,535 to get `u`. Compute `base = min(30 seconds × 2^(AttemptCount-1), 30 minutes)`, then `delay = min(base × (0.8 + 0.4u), 30 minutes)`. For `00000000-0000-0000-0000-000000000001`, attempts 1–3 produce 27.880 s, 53.390 s, and 131.690 s. These values are fixed test vectors.
+**Backoff contract:** Encode the input as lower-case UTF-8 `InvitationId:D + ":" + AttemptCount`. Take the first unsigned 16-bit big-endian value from SHA-256 and divide by 65,535 to get `u`. Compute `base = min(30 seconds × 2^(AttemptCount-1), 30 minutes)`, then `delay = min(base × (0.8 + 0.4u), 30 minutes)`. Quantize the final delay to the nearest 10 milliseconds with midpoint rounding away from zero. For `00000000-0000-0000-0000-000000000001`, attempts 1–3 produce 27.880 s, 53.390 s, and 131.690 s. These values are fixed test vectors.
 
 **Mental model:** Retry is durable state, not a sleeping thread.
 
@@ -522,18 +522,170 @@ Sequential implementation, no parallelization opportunity. The provider behavior
 - Episode 25 needs both failure classes: a prolonged transient failure proves budget exhaustion, while a permanent rejection proves the immediate-terminal path.
 - The UI belongs last. Its projection becomes simple and truthful only after retry, lease, terminal, and observability states exist in the domain.
 
+## Episode 23 engineering plan
+
+- Reviewed: 2026-09-08
+- Review target: Episode 23 only
+- Status: CLEARED FOR IMPLEMENTATION
+- Scope decision: Ivan's 2026-09-08 approval authorizes the Episode 23 checkpoint and release workflow. Episodes 24–28 remain deferred.
+
+### Scope challenge
+
+The existing outbox row, dispatcher, `TimeProvider`, protected envelope, bounded batch, and provider idempotency key already solve every concern except durable retry eligibility. The smallest complete slice adds three physical fields to the outbox row, updates the existing dispatcher, replaces the obsolete offset index, and extends the current focused tests. It does not add a scheduler, queue product, claim service, delivery-status hierarchy, or provider result abstraction.
+
+The migration's designer and model snapshot are generated companions rather than extra runtime concepts. Curriculum, About text, README, and release metadata are checkpoint/distribution work. No new service or standalone artifact is introduced.
+
+### What already exists
+
+| Existing boundary | Reuse decision |
+| --- | --- |
+| `TenantInvitationOutboxMessage` keyed by immutable `InvitationId` | Extend it with retry state; do not create a parallel retry entity. |
+| `TenantInvitationOutboxDispatcher.ProcessBatchAsync` | Keep the bounded sweep and fresh scopes; replace offset paging with a due query. |
+| Injected `TimeProvider` and `ManualTimeProvider` tests | Use UTC application time for Episode 23 eligibility and deterministic tests. Episode 24 deliberately moves lease authority to SQL Server time. |
+| Episode 22 provider idempotency | Reuse the same key when timeout, acknowledgement failure, or restart repeats a call. |
+| Existing no-exception logging | Preserve it; persist only allow-listed failure codes. |
+
+### Architecture review
+
+The Episode 23 physical schema is exactly:
+
+| Field | CLR/storage shape | Initial and migration value | Invariant |
+| --- | --- | --- | --- |
+| `AttemptCount` | non-null `int` | `0` | Attempts consumed at the application boundary; never negative. |
+| `NextAttemptAt` | non-null UTC `DateTime` | `CreatedAt` | Work is due when `NextAttemptAt <= TimeProvider.GetUtcNow().UtcDateTime`. |
+| `FailureCode` | nullable string, max 32 | `null` | Only `provider-failure`, `delivery-timeout`, or `acknowledgement-failure`. |
+
+`Pending` remains conceptual while the row exists; there is no status column. `FirstAttemptAt`, `DedupeGuaranteedUntil`, `LastOutcome`, claim fields, terminal fields, budgets, and redrive history are introduced only by the later episode that uses them. Existing Episode 22 rows backfill as immediately due. Deployment must first stop or drain older workers and retain the Episode 22 warning that pre-idempotency attempts cannot be deduplicated retroactively.
+
+```text
+load earliest due row
+        |
+        v
+validate invitation + protected envelope
+        |
+        v
+SaveChanges: AttemptCount += 1
+        |
+        v
+provider I/O (no database transaction held)
+   | success               | timeout/failure
+   v                       v
+delete row            SaveChanges atomically:
+   | delete fails          NextAttemptAt + FailureCode
+   v                       |
+schedule              row disappears from due query
+acknowledgement       until its persisted UTC time
+failure
+```
+
+Persisting the attempt immediately before provider I/O makes shutdown or process loss after dispatch truthful: an attempt slot was consumed even though the provider call may not have started and its outcome may be unknown. Cancellation before that save consumes nothing. Cooperative host cancellation after it propagates and leaves the row immediately restartable with its previous failure code. Episode 22 idempotency makes that replay safe.
+
+Provider exceptions remain the existing Episode 23 boundary. A timeout maps to `delivery-timeout`; another non-host provider exception maps to `provider-failure`. A successful provider call whose delete fails maps to `acknowledgement-failure` when a fresh-context update is still possible. Adding typed accepted, duplicate, permanent, and unknown outcomes now would pre-build Episode 25 without changing this episode's retry decision.
+
+`NextAttemptAt` and `FailureCode` change in one `SaveChanges`. If that save fails, neither field changes; the already-persisted `AttemptCount` remains. The computed due time is anchored to failure or acknowledgement observation and capped at the invitation expiry so expired protected work becomes eligible for the existing discard path promptly.
+
+### Backoff and query contract
+
+The backoff implementation follows the Episode 23 contract exactly, including nearest-10-millisecond quantization. The cap applies after jitter. Growth is asserted before the base cap; perpetual monotonicity is not promised after the cap because deterministic jitter may make a later capped attempt slightly shorter.
+
+Every sweep uses one captured UTC `now` and performs:
+
+```text
+WHERE NextAttemptAt <= now
+ORDER BY NextAttemptAt, CreatedAt, InvitationId
+TAKE 20
+```
+
+The matching composite index is `(NextAttemptAt, CreatedAt, InvitationId)`. `_nextBatchOffset` and `Skip` are removed: once failed rows move into the future, advancing an offset would skip still-due work. Multiple workers may still select the same row; Episode 24 owns claims and fencing.
+
+### Code quality review
+
+Keep the retry calculator and allow-list on `TenantInvitationOutboxMessage`. That makes invalid attempt counts and codes entity invariants without adding a one-method service. The dispatcher owns orchestration and maps only the three outcomes it can actually observe. Migration SQL performs the historical `CreatedAt` backfill without referencing current CLR entity code.
+
+No raw exception, recipient, code, protected payload, tenant identifier, or user identifier becomes retry state or log data. A database check constraint mirrors the application allow-list, and a second constraint rejects negative attempt counts.
+
+### Test review
+
+```text
+CODE PATHS                                      FAILURE / RESTART FLOWS
+[+] new outbox row                              [+] provider failure
+    +-- attempt=0, due=created, code=null            +-- attempt persisted before I/O
+[+] due query                                        +-- code + next due saved together
+    +-- past/exact due -> selected                    +-- immediate sweep ignores row
+    +-- future -> ignored                             +-- exact due boundary retries
+    +-- >BatchSize -> deterministic page         [+] timeout
+[+] begin attempt                                    +-- non-cooperative task released
+    +-- save fails -> provider not called             +-- allow-listed timeout only
+    +-- host stops after save -> count retained   [+] acknowledgement failure
+[+] backoff                                           +-- provider effect accepted once
+    +-- fixed vectors                                 +-- failed delete backs off replay
+    +-- deterministic identity jitter            [+] process restart
+    +-- growth before cap + 30-minute bound           +-- future due survives host rebuild
+[+] migration                                         +-- at due, same key succeeds
+    +-- old rows due at CreatedAt                 [+] confidentiality
+    +-- payload/key/FK preserved                       +-- malicious exception text absent
+    +-- invalid code rejected by database              +-- logs and persisted state allow-listed
+```
+
+Focused xUnit coverage must include the fixed vectors, deterministic identity jitter, pre-cap growth and large-attempt bound, initial state, past/exact/future eligibility, pre-I/O attempt persistence, failure and timeout scheduling, host cancellation, schedule-save atomicity, acknowledgement-delete failure, process restart, bounded/fair due paging, migration backfill, physical index order, database constraints, model drift, and secret scans. Existing idempotency, poison-envelope, API, UI, capacity, scope, and startup tests remain green.
+
+### Performance review
+
+Each attempt adds one short pre-I/O update and, only on failure, one short scheduling update. No transaction or database connection remains open across provider I/O. The due query is bounded to 20 rows and begins with the indexed predicate/order column. The SHA-256 input is a non-secret identifier plus a small integer; it is computed once per failed attempt. No cache or additional infrastructure is justified.
+
+### Failure modes
+
+| Failure | Test | Handling | User-visible behavior |
+| --- | --- | --- | --- |
+| Provider unavailable | Focused integration | Persist `provider-failure` and next due atomically | Work remains durable and stops hot-looping. |
+| Provider exceeds timeout | Controlled-time integration | Persist `delivery-timeout`; observe a late task fault without attaching it | Replay is delayed and remains idempotent. |
+| Delete fails after acceptance | Trigger-backed integration | Persist `acknowledgement-failure` when the database accepts updates | One logical provider effect; retry waits. |
+| Process stops after begin-attempt save | Cancellation/restart proof | Count remains; row stays restartable | No false success and no lost work. |
+| Retry-state update fails | Trigger-backed integration | Atomic save changes neither due time nor code | Batch reports a safe failure; durable intent remains. |
+| Legacy row upgrades | Migration integration | Backfill count 0, due at `CreatedAt`, code null | Existing protected payload and FK remain intact. |
+| More than 20 due rows | Bounded-order proof | Requery from the head; completed/deferred rows leave the due set | Later work advances without offset gaps. |
+
+No critical failure is silent and untested.
+
+### NOT in scope
+
+- Typed provider outcomes, retry budget, dead letters, reconciliation, and redrive: Episode 25 owns outcome normalization and terminal handling.
+- Multi-worker claims, leases, SQL Server clock authority, and stale-token fencing: Episode 24 owns coordination.
+- Hangfire scheduling: Episode 27 will wake bounded sweeps; the database remains authoritative.
+- Metrics, traces, additional operational logs, or UI: Episodes 26 and 28 own those surfaces.
+- A real provider SDK or new queue product: this slice proves durable application state with the deterministic adapter.
+
+### Parallelization
+
+Sequential implementation, no parallelization opportunity. The entity, dispatcher, migration, and focused tests form one dependency chain. Lesson and release work begins only after the immutable source checkpoint passes.
+
+## Implementation Tasks
+
+- [x] **T1 (P1, human: ~2h / Codex: ~20m)** - Retry entity and migration - Persist the three-field retry contract and replace the due-work index.
+  - Surfaced by: Architecture review - the current row has no restart-safe eligibility state.
+  - Files: `TenantInvitationOutboxMessage`, `FeatureLabDbContext`, migration, snapshot, and migration tests.
+  - Verify: migration-from-empty, Episode 22 row backfill, constraints, index order, and model-drift tests.
+- [x] **T2 (P1, human: ~2h / Codex: ~25m)** - Dispatcher - Persist attempt start, select only due work, and schedule allow-listed backoff for provider, timeout, and acknowledgement failures.
+  - Surfaced by: Architecture and performance reviews - the current one-second polling path hot-loops failures and offset paging becomes incorrect after due filtering.
+  - Files: `TenantInvitationOutboxDispatcher` and focused delivery tests.
+  - Verify: fixed backoff vectors plus due, restart, cancellation, atomicity, batching, idempotency, and confidentiality tests.
+- [x] **T3 (P1, human: ~1h / Codex: ~15m)** - Checkpoint contract - Add only Episode 23 to the ordered curriculum and document its guarantee and limits.
+  - Surfaced by: Distribution review - approved content does not become a release until curriculum, source, lesson registry, and production state agree.
+  - Files: `content/curriculum.json`, `README.md`, `src/FeatureLab.Web/Program.cs`, this design, lesson registry, and production state.
+  - Verify: format, Release build, all tests, migration drift, vulnerability, confidentiality, and package-integrity gates.
+
 ## GSTACK REVIEW REPORT
 
 | Review | Trigger | Why | Runs | Status | Findings |
 | --- | --- | --- | ---: | --- | --- |
 | CEO Review | `/plan-ceo-review` | Scope and strategy | 0 | - | The approved builder design supplied the scope decision. |
 | Codex Review | `/codex review` | Independent second opinion | 0 | - | Not required for this plan-stage slice. |
-| Eng Review | `/plan-eng-review` | Architecture and tests (required) | 1 | CLEAR | One retention ambiguity resolved; 0 open issues and 0 critical gaps. |
-| Design Review | `/plan-design-review` | UI/UX gaps | 0 | - | No UI change in Episode 22. |
+| Eng Review | `/plan-eng-review` | Architecture and tests (required) | 2 | CLEAR | Episode 23: nine contract ambiguities resolved; 0 open issues and 0 critical gaps. |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | - | No UI change in Episode 23. |
 | DX Review | `/plan-devex-review` | Developer experience gaps | 0 | - | Existing run/test workflow is unchanged. |
 
-**OUTSIDE VOICE:** A read-only engineering audit agreed that the existing key and interface are sufficient, no migration is needed, and provider retention must be explicit.
+**OUTSIDE VOICE:** Three independent read-only audits found the fixed-vector rounding mismatch, the offset-pagination hazard, and the attempt-timing ambiguity. All were folded into the Episode 23 plan. Typed provider outcomes were deliberately deferred to Episode 25.
 
-**VERDICT:** ENG CLEARED - ready to implement Episode 22 only.
+**VERDICT:** ENG CLEARED - ready to implement and release Episode 23 only.
 
 NO UNRESOLVED DECISIONS

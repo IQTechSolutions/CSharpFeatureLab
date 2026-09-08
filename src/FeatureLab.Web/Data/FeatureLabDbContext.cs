@@ -131,7 +131,19 @@ public sealed class FeatureLabDbContext(
         var tenantInvitationOutbox =
             modelBuilder.Entity<TenantInvitationOutboxMessage>();
 
-        tenantInvitationOutbox.ToTable("TenantInvitationOutbox");
+        tenantInvitationOutbox.ToTable(
+            "TenantInvitationOutbox",
+            table =>
+            {
+                table.HasCheckConstraint(
+                    "CK_TenantInvitationOutbox_AttemptCount_NonNegative",
+                    "\"AttemptCount\" >= 0");
+                table.HasCheckConstraint(
+                    "CK_TenantInvitationOutbox_FailureCode_Valid",
+                    "\"FailureCode\" IS NULL OR \"FailureCode\" IN "
+                    + "('provider-failure', 'delivery-timeout', "
+                    + "'acknowledgement-failure')");
+            });
         tenantInvitationOutbox.HasKey(message => message.InvitationId);
         tenantInvitationOutbox.Property(message => message.TenantId)
             .IsRequired();
@@ -141,6 +153,13 @@ public sealed class FeatureLabDbContext(
             .IsRequired();
         tenantInvitationOutbox.Property(message => message.CreatedAt)
             .IsRequired();
+        tenantInvitationOutbox.Property(message => message.AttemptCount)
+            .IsRequired();
+        tenantInvitationOutbox.Property(message => message.NextAttemptAt)
+            .IsRequired();
+        tenantInvitationOutbox.Property(message => message.FailureCode)
+            .HasMaxLength(
+                TenantInvitationOutboxMessage.MaximumFailureCodeLength);
         tenantInvitationOutbox.HasOne<TenantInvitation>()
             .WithOne()
             .HasForeignKey<TenantInvitationOutboxMessage>(
@@ -148,6 +167,7 @@ public sealed class FeatureLabDbContext(
             .OnDelete(DeleteBehavior.Cascade);
         tenantInvitationOutbox.HasIndex(message => new
         {
+            message.NextAttemptAt,
             message.CreatedAt,
             message.InvitationId,
         });

@@ -23,6 +23,14 @@ The API starts with two endpoints:
 - `POST /api/work-items`
 - `GET /api/work-items`
 
+Failed deliveries persist their attempt count, earliest next eligible UTC time,
+and one allow-listed failure code. The dispatcher queries only due rows in stable,
+bounded order and applies deterministic exponential backoff with jitter, so the
+schedule survives a process restart without storing exception text. Attempt start and
+retry scheduling are separate short database updates; no transaction remains open
+across provider I/O. Multiple-worker claiming and terminal retry outcomes remain later
+production layers.
+
 ## Course rules
 
 - Every episode leaves the application compiling and tested.

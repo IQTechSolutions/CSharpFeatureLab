@@ -14,8 +14,6 @@ public sealed class TenantInvitationOutboxDispatcher(
 {
     private readonly SemaphoreSlim _batchGate = new(1, 1);
 
-    private int _nextBatchOffset;
-
     public const int BatchSize = 20;
 
     public static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(1);
@@ -85,40 +83,23 @@ public sealed class TenantInvitationOutboxDispatcher(
     private async Task<int> ProcessBatchCoreAsync(
         CancellationToken cancellationToken)
     {
+        var dueAt = timeProvider.GetUtcNow().UtcDateTime;
         var invitationIds = await LoadBatchAsync(
-            _nextBatchOffset,
+            dueAt,
             cancellationToken);
-        if (invitationIds.Length == 0 && _nextBatchOffset > 0)
-        {
-            _nextBatchOffset = 0;
-            invitationIds = await LoadBatchAsync(
-                _nextBatchOffset,
-                cancellationToken);
-        }
 
-        var retainedCount = 0;
-        // This single-process sequential worker deliberately has no durable
-        // retry schedule or distributed claim. Episodes 23 and 24 add those.
+        // This single-process sequential worker deliberately has no
+        // distributed claim. Episode 24 adds that coordination boundary.
         foreach (var invitationId in invitationIds)
         {
-            if (await DispatchOneAsync(invitationId, cancellationToken))
-            {
-                retainedCount++;
-            }
+            await DispatchOneAsync(invitationId, cancellationToken);
         }
-
-        // Rows removed during this pass close the gap before the next page.
-        // Advancing only by retained rows lets later work make progress when a
-        // complete batch is waiting on a failing provider.
-        _nextBatchOffset = invitationIds.Length == BatchSize
-            ? _nextBatchOffset + retainedCount
-            : 0;
 
         return invitationIds.Length;
     }
 
     private async Task<Guid[]> LoadBatchAsync(
-        int offset,
+        DateTime dueAt,
         CancellationToken cancellationToken)
     {
         await using (var scope = scopeFactory.CreateAsyncScope())
@@ -127,16 +108,17 @@ public sealed class TenantInvitationOutboxDispatcher(
                 .GetRequiredService<FeatureLabDbContext>();
             return await dbContext.TenantInvitationOutboxMessages
                 .AsNoTracking()
-                .OrderBy(message => message.CreatedAt)
+                .Where(message => message.NextAttemptAt <= dueAt)
+                .OrderBy(message => message.NextAttemptAt)
+                .ThenBy(message => message.CreatedAt)
                 .ThenBy(message => message.InvitationId)
                 .Select(message => message.InvitationId)
-                .Skip(offset)
                 .Take(BatchSize)
                 .ToArrayAsync(cancellationToken);
         }
     }
 
-    private async Task<bool> DispatchOneAsync(
+    private async Task DispatchOneAsync(
         Guid invitationId,
         CancellationToken cancellationToken)
     {
@@ -153,7 +135,7 @@ public sealed class TenantInvitationOutboxDispatcher(
                     cancellationToken);
             if (message is null)
             {
-                return false;
+                return;
             }
 
             var invitation = await dbContext.TenantInvitations
@@ -178,7 +160,7 @@ public sealed class TenantInvitationOutboxDispatcher(
                     out envelope))
             {
                 await DiscardAsync(invitationId, cancellationToken);
-                return false;
+                return;
             }
 
             if (snapshot is null
@@ -186,7 +168,7 @@ public sealed class TenantInvitationOutboxDispatcher(
                 || !Matches(snapshot, envelope!))
             {
                 await DiscardAsync(invitationId, cancellationToken);
-                return false;
+                return;
             }
         }
 
@@ -194,21 +176,26 @@ public sealed class TenantInvitationOutboxDispatcher(
         if (snapshot.ClosedAt is not null || snapshot.ExpiresAt <= now)
         {
             await DiscardAsync(invitationId, cancellationToken);
-            return false;
+            return;
         }
 
+        await using var deliveryScope = scopeFactory.CreateAsyncScope();
+        var delivery = deliveryScope.ServiceProvider
+            .GetRequiredService<ITenantInvitationDelivery>();
+        if (!await BeginAttemptAsync(invitationId, cancellationToken))
+        {
+            return;
+        }
+
+        using var timeout = new CancellationTokenSource(
+            DeliveryTimeout,
+            timeProvider);
+        using var deliveryCancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken,
+                timeout.Token);
         try
         {
-            await using var deliveryScope = scopeFactory.CreateAsyncScope();
-            var delivery = deliveryScope.ServiceProvider
-                .GetRequiredService<ITenantInvitationDelivery>();
-            using var timeout = new CancellationTokenSource(
-                DeliveryTimeout,
-                timeProvider);
-            using var deliveryCancellation =
-                CancellationTokenSource.CreateLinkedTokenSource(
-                    cancellationToken,
-                    timeout.Token);
             var deliveryTask = delivery.DeliverAsync(
                 snapshot.InvitationId,
                 envelope!.NormalizedRecipient,
@@ -223,20 +210,113 @@ public sealed class TenantInvitationOutboxDispatcher(
         {
             throw;
         }
+        catch (OperationCanceledException)
+            when (timeout.IsCancellationRequested)
+        {
+            if (await ScheduleRetryAsync(
+                invitationId,
+                snapshot.ExpiresAt,
+                TenantInvitationOutboxMessage.DeliveryTimeoutFailureCode,
+                cancellationToken))
+            {
+                LogDeferred(invitationId);
+            }
+
+            return;
+        }
         catch (Exception)
         {
-            // A provider failure keeps the durable message pending. Its
-            // exception is intentionally omitted because adapters can include
-            // recipient data or the raw capability in exception messages.
-            logger.LogWarning(
-                DeliveryDeferredEvent,
-                "Tenant invitation delivery was deferred for invitation {InvitationId}.",
-                invitationId);
-            return true;
+            if (await ScheduleRetryAsync(
+                invitationId,
+                snapshot.ExpiresAt,
+                TenantInvitationOutboxMessage.ProviderFailureCode,
+                cancellationToken))
+            {
+                LogDeferred(invitationId);
+            }
+
+            return;
         }
 
-        await DeleteDeliveredAsync(invitationId, cancellationToken);
-        return false;
+        try
+        {
+            await DeleteDeliveredAsync(invitationId, cancellationToken);
+        }
+        catch (OperationCanceledException)
+            when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            if (await ScheduleRetryAsync(
+                invitationId,
+                snapshot.ExpiresAt,
+                TenantInvitationOutboxMessage.AcknowledgementFailureCode,
+                cancellationToken))
+            {
+                LogDeferred(invitationId);
+            }
+
+            return;
+        }
+    }
+
+    private async Task<bool> BeginAttemptAsync(
+        Guid invitationId,
+        CancellationToken cancellationToken)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider
+            .GetRequiredService<FeatureLabDbContext>();
+        var message = await dbContext.TenantInvitationOutboxMessages
+            .SingleOrDefaultAsync(
+                candidate => candidate.InvitationId == invitationId,
+                cancellationToken);
+        if (message is null)
+        {
+            return false;
+        }
+
+        message.BeginAttempt();
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return true;
+    }
+
+    private async Task<bool> ScheduleRetryAsync(
+        Guid invitationId,
+        DateTimeOffset expiresAt,
+        string failureCode,
+        CancellationToken cancellationToken)
+    {
+        await using var scope = scopeFactory.CreateAsyncScope();
+        var dbContext = scope.ServiceProvider
+            .GetRequiredService<FeatureLabDbContext>();
+        var message = await dbContext.TenantInvitationOutboxMessages
+            .SingleOrDefaultAsync(
+                candidate => candidate.InvitationId == invitationId,
+                cancellationToken);
+        if (message is null)
+        {
+            return false;
+        }
+
+        message.ScheduleRetry(
+            timeProvider.GetUtcNow(),
+            expiresAt,
+            failureCode);
+        await dbContext.SaveChangesAsync(cancellationToken);
+        return true;
+    }
+
+    private void LogDeferred(Guid invitationId)
+    {
+        // Provider and persistence exceptions are intentionally omitted: an
+        // adapter can include the recipient or raw capability in its message.
+        logger.LogWarning(
+            DeliveryDeferredEvent,
+            "Tenant invitation delivery was deferred for invitation {InvitationId}.",
+            invitationId);
     }
 
     private async Task DiscardAsync(

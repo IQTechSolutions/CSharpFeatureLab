@@ -41,6 +41,11 @@ public sealed class MigrationTests
                 migration => migration.EndsWith(
                     "_AddProtectedTenantInvitationOutbox",
                     StringComparison.Ordinal));
+            Assert.Contains(
+                appliedMigrations,
+                migration => migration.EndsWith(
+                    "_AddTenantInvitationRetryState",
+                    StringComparison.Ordinal));
             Assert.Empty(await dbContext.Database.GetPendingMigrationsAsync());
             Assert.False(dbContext.Database.HasPendingModelChanges());
             Assert.Empty(dbContext.TenantInvitationOutboxMessages);
@@ -52,14 +57,140 @@ public sealed class MigrationTests
                 outboxType.FindProperty(
                     nameof(TenantInvitationOutboxMessage.ProtectedPayload))!
                     .GetMaxLength());
+            Assert.Equal(
+                TenantInvitationOutboxMessage.MaximumFailureCodeLength,
+                outboxType.FindProperty(
+                    nameof(TenantInvitationOutboxMessage.FailureCode))!
+                    .GetMaxLength());
+            var outboxTableSql = await ReadOutboxTableSqlAsync(dbContext);
+            Assert.Contains(
+                "CK_TenantInvitationOutbox_AttemptCount_NonNegative",
+                outboxTableSql,
+                StringComparison.Ordinal);
+            Assert.Contains(
+                "CK_TenantInvitationOutbox_FailureCode_Valid",
+                outboxTableSql,
+                StringComparison.Ordinal);
             Assert.Contains(
                 outboxType.GetIndexes(),
                 index => index.Properties.Select(property => property.Name)
                     .SequenceEqual([
+                        nameof(TenantInvitationOutboxMessage.NextAttemptAt),
                         nameof(TenantInvitationOutboxMessage.CreatedAt),
                         nameof(TenantInvitationOutboxMessage.InvitationId),
                     ]));
+            Assert.Equal(
+                new[] { "NextAttemptAt", "CreatedAt", "InvitationId" },
+                await ReadDueIndexColumnsAsync(dbContext));
+            var requiredColumns = await ReadOutboxNotNullColumnsAsync(
+                dbContext);
+            Assert.Contains("AttemptCount", requiredColumns);
+            Assert.Contains("NextAttemptAt", requiredColumns);
             await AssertForeignKeysAreValidAsync(dbContext);
+        }
+        finally
+        {
+            if (File.Exists(databasePath))
+            {
+                File.Delete(databasePath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Retry_migration_backfills_existing_row_and_enforces_constraints()
+    {
+        var databasePath = Path.Combine(
+            Path.GetTempPath(),
+            $"feature-lab-retry-migration-{Guid.NewGuid():N}.db");
+
+        try
+        {
+            var options = new DbContextOptionsBuilder<FeatureLabDbContext>()
+                .UseSqlite($"Data Source={databasePath};Pooling=False")
+                .Options;
+            await using var dbContext =
+                new FeatureLabDbContext(options, new TenantContext());
+            await dbContext.Database.MigrateAsync(
+                "20260904163843_AddProtectedTenantInvitationOutbox");
+
+            var invitationId = Guid.NewGuid();
+            var tenantId = Guid.NewGuid();
+            var normalizedEmail =
+                $"LEGACY-{Guid.NewGuid():N}@EXAMPLE.TEST";
+            var createdAt = new DateTime(
+                2026,
+                9,
+                8,
+                12,
+                34,
+                56,
+                DateTimeKind.Utc);
+            const string protectedPayload = "legacy-protected-payload";
+            await dbContext.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                INSERT INTO "TenantInvitations"
+                    ("Id", "TenantId", "NormalizedEmail", "CodeHash",
+                     "ExpiresAt", "Version")
+                VALUES
+                    ({invitationId}, {tenantId}, {normalizedEmail},
+                     {new string('A', 64)},
+                     {new DateTimeOffset(createdAt).AddHours(1)}, {1L});
+                """);
+            await dbContext.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                INSERT INTO "TenantInvitationOutbox"
+                    ("InvitationId", "TenantId", "ProtectedPayload", "CreatedAt")
+                VALUES
+                    ({invitationId}, {tenantId}, {protectedPayload}, {createdAt});
+                """);
+
+            await dbContext.Database.MigrateAsync();
+
+            var migrated = await dbContext.TenantInvitationOutboxMessages
+                .SingleAsync(message => message.InvitationId == invitationId);
+            Assert.Equal(tenantId, migrated.TenantId);
+            Assert.Equal(protectedPayload, migrated.ProtectedPayload);
+            Assert.Equal(createdAt, migrated.CreatedAt);
+            Assert.Equal(0, migrated.AttemptCount);
+            Assert.Equal(migrated.CreatedAt, migrated.NextAttemptAt);
+            Assert.Null(migrated.FailureCode);
+            await AssertForeignKeysAreValidAsync(dbContext);
+            Assert.Equal(
+                new[] { "NextAttemptAt", "CreatedAt", "InvitationId" },
+                await ReadDueIndexColumnsAsync(dbContext));
+
+            var negativeAttempt = await Assert.ThrowsAsync<SqliteException>(
+                () => dbContext.Database.ExecuteSqlRawAsync(
+                    """
+                    UPDATE "TenantInvitationOutbox"
+                    SET "AttemptCount" = -1;
+                    """));
+            Assert.Equal(19, negativeAttempt.SqliteErrorCode);
+            Assert.Contains(
+                "CK_TenantInvitationOutbox_AttemptCount_NonNegative",
+                negativeAttempt.Message,
+                StringComparison.Ordinal);
+
+            var unknownFailure = await Assert.ThrowsAsync<SqliteException>(
+                () => dbContext.Database.ExecuteSqlRawAsync(
+                    """
+                    UPDATE "TenantInvitationOutbox"
+                    SET "FailureCode" = 'raw provider exception';
+                    """));
+            Assert.Equal(19, unknownFailure.SqliteErrorCode);
+            Assert.Contains(
+                "CK_TenantInvitationOutbox_FailureCode_Valid",
+                unknownFailure.Message,
+                StringComparison.Ordinal);
+
+            await dbContext.Database.ExecuteSqlInterpolatedAsync(
+                $"""
+                DELETE FROM "TenantInvitations"
+                WHERE "Id" = {invitationId};
+                """);
+            Assert.False(await dbContext.TenantInvitationOutboxMessages
+                .AnyAsync(message => message.InvitationId == invitationId));
         }
         finally
         {
@@ -562,6 +693,61 @@ public sealed class MigrationTests
                 File.Delete(databasePath);
             }
         }
+    }
+
+    private static async Task<string[]> ReadDueIndexColumnsAsync(
+        FeatureLabDbContext dbContext)
+    {
+        var connection = dbContext.Database.GetDbConnection();
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText =
+            "PRAGMA index_info('IX_TenantInvitationOutbox_NextAttemptAt_CreatedAt_InvitationId');";
+        await using var reader = await command.ExecuteReaderAsync();
+        var columns = new List<string>();
+        while (await reader.ReadAsync())
+        {
+            columns.Add(reader.GetString(2));
+        }
+
+        return columns.ToArray();
+    }
+
+    private static async Task<string> ReadOutboxTableSqlAsync(
+        FeatureLabDbContext dbContext)
+    {
+        var connection = dbContext.Database.GetDbConnection();
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            SELECT "sql"
+            FROM "sqlite_master"
+            WHERE "type" = 'table'
+              AND "name" = 'TenantInvitationOutbox';
+            """;
+
+        return (string)(await command.ExecuteScalarAsync())!;
+    }
+
+    private static async Task<string[]> ReadOutboxNotNullColumnsAsync(
+        FeatureLabDbContext dbContext)
+    {
+        var connection = dbContext.Database.GetDbConnection();
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA table_info('TenantInvitationOutbox');";
+        await using var reader = await command.ExecuteReaderAsync();
+        var columns = new List<string>();
+        while (await reader.ReadAsync())
+        {
+            if (reader.GetInt32(3) == 1)
+            {
+                columns.Add(reader.GetString(1));
+            }
+        }
+
+        return columns.ToArray();
     }
 
     private static async Task AssertForeignKeysAreValidAsync(

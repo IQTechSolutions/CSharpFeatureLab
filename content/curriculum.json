@@ -197,6 +197,14 @@
       "playlist": "Production .NET",
       "checkpoint": "episode/22-provider-boundary-idempotency",
       "status": "release"
+    },
+    {
+      "number": 23,
+      "slug": "durable-retry-backoff",
+      "title": "Persist Retry Backoff Instead of Sleeping in Memory",
+      "playlist": "Production .NET",
+      "checkpoint": "episode/23-durable-retry-backoff",
+      "status": "release"
     }
   ]
 }
